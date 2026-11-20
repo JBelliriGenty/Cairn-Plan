@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<!-- cairn-plan (embedded in the binary). CSP: no inline JS or CSS. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cairn Plan</title>
+  <link href="icon.svg" rel="icon" type="image/svg+xml">
+  <link href="plan.css" rel="stylesheet">
+  <script src="i18n.js" defer></script>
+  <script src="plan.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <a class="brand" href="#/">
+      <img src="icon.svg" class="logo" alt="">
+      <span><b>Cairn Plan</b><small id="who"></small></span>
+    </a>
+    <a id="bell" class="bell" href="#/n"></a>
+    <nav id="nav"></nav>
+    <div class="side-foot">
+      <a id="settings" class="gear" href="#/s" hidden></a>
+      <button id="lang" type="button" class="quiet"></button>
+      <small id="version"></small>
+    </div>
+  </aside>
+  <main id="view"></main>
+</div>
+<div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "_": "What an agent pull request may hold and still be merged without a human (read by agent.py, and by a merging bot before it merges: a breach = no automatic merge, the pull request stays open for a person). Files in 'blocking' are worse: the agent does not even open the pull request (CI workflows run code with the forge's runner, secrets never go in). A pattern with a / is matched against the whole path, one without against the file name; * also crosses folders. Additive schema changes (CREATE TABLE, ADD COLUMN) and dependency manifests are allowed since 0.14.0; destructive ones are not.",
+  "max_lines": 400,
+  "max_files": 20,
+  "blocking": [
+    ".forgejo/*", ".github/*", ".gitea/*", ".env*", "*.sops.*", "secrets*"
+  ],
+  "forbidden": [
+    ".forgejo/*", ".github/*", ".gitea/*", ".claude/*", "deploy/*",
+    "Dockerfile*", "Containerfile*", "compose*.yml", "compose*.yaml", "docker-compose*.yml", "docker-compose*.yaml",
+    ".env*", "*.sops.*", "secrets*", "renovate.json", "CLAUDE.md", "AGENTS.md", ".gitattributes", ".gitmodules",
+    "backend/migrations/*"
+  ],
+  "forbidden_added": "(?i)\\bdrop\\s+(table|index|column|schema|database|view|trigger)\\b|\\brename\\s+(to|column)\\b|\\balter\\s+column\\b|\\btruncate\\b"
+}
