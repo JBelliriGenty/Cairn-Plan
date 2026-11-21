@@ -13,7 +13,7 @@ RUN apt-get update \
 USER worker
 RUN curl -fsSL https://claude.ai/install.sh | bash -s ${CLAUDE_VERSION}
 USER root
-COPY agent.py prompt.md rules.json test_agent.py /opt/agent/
+COPY agent.py prompt.md prompt-chef.md rules.json team.json test_agent.py /opt/agent/
 RUN cd /opt/agent && python3 test_agent.py
 VOLUME /work
 EXPOSE 9095

@@ -23,7 +23,9 @@ pub const STATES: [&str; 6] = ["backlog", "todo", "in_progress", "waiting", "don
 pub const PRIORITIES: [&str; 5] = ["none", "low", "medium", "high", "urgent"];
 const ROLES: [&str; 3] = ["reader", "contributor", "owner"];
 /// Ticket fields a client may set, in the order they are checked.
-const FIELDS: [&str; 8] = ["title", "description", "state", "priority", "assignee", "start_date", "end_date", "milestone"];
+const FIELDS: [&str; 9] = ["title", "description", "state", "priority", "assignee", "start_date", "end_date", "milestone", "agent"];
+/// Sub-tickets a parent may have; a sub-ticket has none of its own.
+const MAX_CHILDREN: i64 = 8;
 
 const SCHEMA: &str = "
 PRAGMA foreign_keys = ON;
@@ -79,6 +81,9 @@ pub fn open(path: &str) -> Connection {
     let _ = c.execute("ALTER TABLE users ADD COLUMN mail INTEGER NOT NULL DEFAULT 1", []);
     // 0.10.0: the ntfy topic someone chose for their notifications
     let _ = c.execute("ALTER TABLE users ADD COLUMN ntfy_topic TEXT NOT NULL DEFAULT ''", []);
+    // 0.15.0: the role of the agent a ticket is for, and the parent of a sub-ticket (0: none)
+    let _ = c.execute("ALTER TABLE tickets ADD COLUMN agent TEXT NOT NULL DEFAULT ''", []);
+    let _ = c.execute("ALTER TABLE tickets ADD COLUMN parent INTEGER NOT NULL DEFAULT 0", []);
     c
 }
 
@@ -196,6 +201,7 @@ fn check(c: &Connection, pid: i64, field: &str, val: &str) -> R<()> {
         }
         "start_date" | "end_date" => val.is_empty() || valid_date(val),
         "milestone" => val.chars().count() <= 80,
+        "agent" => val.is_empty() || (val.len() <= 20 && valid_login(val)),
         _ => false,
     };
     if ok {
@@ -279,15 +285,21 @@ pub fn project(c: &Connection, a: &Actor, key: &str) -> R<Value> {
     }))?
     .collect())?;
     let mut st = db(c.prepare(
-        "SELECT number, title, state, priority, assignee, start_date, end_date, updated, milestone
-         FROM tickets WHERE project = ?1 ORDER BY number DESC",
+        "SELECT t.number, t.title, t.state, t.priority, t.assignee, t.start_date, t.end_date, t.updated, t.milestone, t.agent,
+                COALESCE((SELECT number FROM tickets p WHERE p.id = t.parent), 0),
+                (SELECT COUNT(*) FROM tickets k WHERE k.parent = t.id AND k.state != 'cancelled'),
+                (SELECT COUNT(*) FROM tickets k WHERE k.parent = t.id AND k.state = 'done')
+         FROM tickets t WHERE t.project = ?1 ORDER BY t.number DESC",
     ))?;
     let tickets: Vec<Value> = db(db(st.query_map(params![pid], |r| {
+        let parent: i64 = r.get(10)?;
         Ok(json!({
             "id": format!("{key}-{}", r.get::<_, i64>(0)?), "title": r.get::<_, String>(1)?,
             "state": r.get::<_, String>(2)?, "priority": r.get::<_, String>(3)?, "assignee": r.get::<_, String>(4)?,
             "start_date": r.get::<_, String>(5)?, "end_date": r.get::<_, String>(6)?, "updated": r.get::<_, i64>(7)?,
-            "milestone": r.get::<_, String>(8)?,
+            "milestone": r.get::<_, String>(8)?, "agent": r.get::<_, String>(9)?,
+            "parent": if parent > 0 { format!("{key}-{parent}") } else { String::new() },
+            "progress": {"total": r.get::<_, i64>(11)?, "done": r.get::<_, i64>(12)?},
         }))
     }))?
     .collect())?;
@@ -378,7 +390,13 @@ pub fn create_ticket(c: &Connection, a: &Actor, key: &str, v: &Value) -> R<Value
         check(c, pid, f, &val)?;
         vals.push(val);
     }
-    if vals[2] != "backlog" && rank < 3 {
+    let parent = match text(v, "parent").filter(|p| !p.is_empty()) {
+        Some(p) => Some(parent_of(c, pid, &a.login, &p)?),
+        None => None,
+    };
+    // a sub-ticket of an approved parent, created by whoever took the parent, is approved with it
+    let delegated = vals[2] == "todo" && parent.is_some_and(|(_, covered)| covered);
+    if vals[2] != "backlog" && rank < 3 && !delegated {
         if vals[2] != "waiting" {
             return denied("only a project owner can approve a ticket");
         }
@@ -393,9 +411,10 @@ pub fn create_ticket(c: &Connection, a: &Actor, key: &str, v: &Value) -> R<Value
     let n: i64 = db(c.query_row("SELECT next_number - 1 FROM projects WHERE id = ?1", params![pid], |r| r.get(0)))?;
     db(c.execute(
         "INSERT INTO tickets(project, number, title, description, state, priority, assignee, start_date, end_date, milestone,
-                             author, created, updated)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
-        params![pid, n, vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], a.login, now()],
+                             author, created, updated, agent, parent)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14)",
+        params![pid, n, vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], a.login, now(), vals[8],
+                parent.map_or(0, |(id, _)| id)],
     ))?;
     let tid = c.last_insert_rowid();
     event(c, tid, &a.login, "created", "", &vals[2])?;
@@ -408,13 +427,65 @@ pub fn create_ticket(c: &Connection, a: &Actor, key: &str, v: &Value) -> R<Value
     Ok(json!({ "id": format!("{key}-{n}") }))
 }
 
+/// Who approved a ticket last, and the id of that event.
+fn approval_event(c: &Connection, tid: i64) -> R<Option<(String, i64)>> {
+    db(c.query_row(
+        "SELECT actor, id FROM events WHERE ticket = ?1 AND field IN ('state', 'created') AND new = 'todo' ORDER BY id DESC LIMIT 1",
+        params![tid],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional())
+}
+
+/// The parent named for a new sub-ticket: (its id, whether its approval
+/// covers the sub-ticket). It does when the parent is in progress, taken by
+/// whoever creates the sub-ticket, approved, and its text unchanged since by
+/// anyone else: what was approved is split, never widened.
+fn parent_of(c: &Connection, pid: i64, login: &str, id: &str) -> R<(i64, bool)> {
+    let (key, n) = id.rsplit_once('-').unwrap_or(("", ""));
+    let found: Option<(i64, i64, String, String, i64)> = db(c
+        .query_row(
+            "SELECT t.id, t.parent, t.state, t.assignee, t.project FROM tickets t JOIN projects p ON p.id = t.project
+             WHERE p.key = ?1 AND t.number = ?2",
+            params![key, n.parse::<i64>().unwrap_or(0)],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional())?;
+    let Some((tid, grand, state, assignee, _)) = found.filter(|f| f.4 == pid) else {
+        return bad("the parent must be a ticket of the same project");
+    };
+    if grand != 0 {
+        return bad("a sub-ticket cannot have sub-tickets");
+    }
+    if state == "done" || state == "cancelled" {
+        return bad("the parent is closed");
+    }
+    let count: i64 = db(c.query_row("SELECT COUNT(*) FROM tickets WHERE parent = ?1", params![tid], |r| r.get(0)))?;
+    if count >= MAX_CHILDREN {
+        return bad("this ticket has as many sub-tickets as it may");
+    }
+    let covered = state == "in_progress"
+        && assignee == login
+        && match approval_event(c, tid)? {
+            Some((by, at)) => {
+                db(c.query_row(
+                    "SELECT COUNT(*) FROM events WHERE ticket = ?1 AND id > ?2 AND field IN ('title', 'description') AND actor != ?3",
+                    params![tid, at, by],
+                    |r| r.get::<_, i64>(0),
+                ))? == 0
+            }
+            None => false,
+        };
+    Ok((tid, covered))
+}
+
 pub fn update_ticket(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value> {
     let (pid, rank, tid) = ticket(c, a, id)?;
     if rank < 2 {
         return denied("readers cannot edit tickets");
     }
     let old: Vec<String> = db(c.query_row(
-        "SELECT title, description, state, priority, assignee, start_date, end_date, milestone FROM tickets WHERE id = ?1",
+        "SELECT title, description, state, priority, assignee, start_date, end_date, milestone, agent FROM tickets WHERE id = ?1",
         params![tid],
         |r| (0..FIELDS.len()).map(|i| r.get(i)).collect(),
     ))?;
@@ -424,7 +495,8 @@ pub fn update_ticket(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value>
         let Some(new) = text(v, f).filter(|n| *n != old[i]) else { continue };
         check(c, pid, f, &new)?;
         if rank < 3 {
-            if (*f == "title" || *f == "description") && state != "backlog" {
+            // the agent role says who builds it: part of what was approved
+            if (*f == "title" || *f == "description" || *f == "agent") && state != "backlog" {
                 return denied("only a project owner can change the text of an approved ticket");
             }
             if *f == "state" && (new == "todo" || state == "backlog") {
@@ -442,6 +514,15 @@ pub fn update_ticket(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value>
                 notify(c, tid, &a.login, "state", new, None)?;
                 if new == "todo" {
                     announce(c, tid, "ticket.approved", &a.login)?;
+                }
+                if new == "cancelled" {
+                    // cancelling a parent stops its sub-tickets: one gesture keeps the owner in charge
+                    let mut st = db(c.prepare("SELECT id, state FROM tickets WHERE parent = ?1 AND state NOT IN ('done', 'cancelled')"))?;
+                    let open: Vec<(i64, String)> = db(db(st.query_map(params![tid], |r| Ok((r.get(0)?, r.get(1)?))))?.collect())?;
+                    for (kid, was) in open {
+                        db(c.execute("UPDATE tickets SET state = 'cancelled' WHERE id = ?1", params![kid]))?;
+                        event(c, kid, &a.login, "state", &was, "cancelled")?;
+                    }
                 }
             }
             "assignee" if !new.is_empty() => notify(c, tid, &a.login, "assigned", "", Some(new))?,
@@ -473,18 +554,34 @@ pub fn mine(c: &Connection, a: &Actor) -> R<Value> {
 pub fn ticket_view(c: &Connection, a: &Actor, id: &str) -> R<Value> {
     let (_, rank, tid) = ticket(c, a, id)?;
     let mut t: Value = db(c.query_row(
-        "SELECT title, description, state, priority, assignee, start_date, end_date, author, created, updated, milestone
-         FROM tickets WHERE id = ?1",
+        "SELECT t.title, t.description, t.state, t.priority, t.assignee, t.start_date, t.end_date, t.author, t.created, t.updated,
+                t.milestone, t.agent, COALESCE((SELECT number FROM tickets p WHERE p.id = t.parent), 0)
+         FROM tickets t WHERE t.id = ?1",
         params![tid],
         |r| {
+            let parent: i64 = r.get(12)?;
             Ok(json!({
                 "title": r.get::<_, String>(0)?, "description": r.get::<_, String>(1)?, "state": r.get::<_, String>(2)?,
                 "priority": r.get::<_, String>(3)?, "assignee": r.get::<_, String>(4)?, "start_date": r.get::<_, String>(5)?,
                 "end_date": r.get::<_, String>(6)?, "author": r.get::<_, String>(7)?, "created": r.get::<_, i64>(8)?,
-                "updated": r.get::<_, i64>(9)?, "milestone": r.get::<_, String>(10)?,
+                "updated": r.get::<_, i64>(9)?, "milestone": r.get::<_, String>(10)?, "agent": r.get::<_, String>(11)?,
+                "parent": if parent > 0 { format!("{}-{parent}", id.rsplit_once('-').map_or("", |(k, _)| k)) } else { String::new() },
             }))
         },
     ))?;
+    let key = id.rsplit_once('-').map_or("", |(k, _)| k);
+    let mut st = db(c.prepare("SELECT number, title, state, agent, assignee FROM tickets WHERE parent = ?1 ORDER BY number"))?;
+    let children: Vec<Value> = db(db(st.query_map(params![tid], |r| {
+        Ok(json!({
+            "id": format!("{key}-{}", r.get::<_, i64>(0)?), "title": r.get::<_, String>(1)?, "state": r.get::<_, String>(2)?,
+            "agent": r.get::<_, String>(3)?, "assignee": r.get::<_, String>(4)?,
+        }))
+    }))?
+    .collect())?;
+    let counted = children.iter().filter(|k| k["state"] != "cancelled").count();
+    let done = children.iter().filter(|k| k["state"] == "done").count();
+    t["progress"] = json!({"total": counted, "done": done});
+    t["children"] = json!(children);
     let mut st = db(c.prepare("SELECT author, body, created FROM comments WHERE ticket = ?1 ORDER BY id"))?;
     let comments: Vec<Value> = db(db(st.query_map(params![tid], |r| {
         Ok(json!({ "author": r.get::<_, String>(0)?, "body": r.get::<_, String>(1)?, "at": r.get::<_, i64>(2)? }))
@@ -540,16 +637,15 @@ pub fn comment(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value> {
     db(c.execute("INSERT INTO comments(ticket, author, body, created) VALUES (?1, ?2, ?3, ?4)", params![tid, a.login, body, now()]))?;
     db(c.execute("UPDATE tickets SET updated = ?1 WHERE id = ?2", params![now(), tid]))?;
     notify(c, tid, &a.login, "comment", &body, None)?;
-    // the answer a waiting ticket waits for is the one of whoever approved it
-    let waiting: bool = db(c.query_row("SELECT state = 'waiting' FROM tickets WHERE id = ?1", params![tid], |r| r.get(0)))?;
-    let approver: Option<String> = db(c
-        .query_row(
-            "SELECT actor FROM events WHERE ticket = ?1 AND field IN ('state', 'created') AND new = 'todo' ORDER BY id DESC LIMIT 1",
-            params![tid],
-            |r| r.get(0),
-        )
-        .optional())?;
-    if waiting && approver.as_deref() == Some(a.login.as_str()) {
+    // the answer a waiting ticket waits for is the one of whoever approved it, or approved its
+    // parent (a sub-ticket is approved by the lead who cut it, on the parent's approval)
+    let (waiting, parent): (bool, i64) =
+        db(c.query_row("SELECT state = 'waiting', parent FROM tickets WHERE id = ?1", params![tid], |r| Ok((r.get(0)?, r.get(1)?))))?;
+    let mut approvers = vec![approval_event(c, tid)?];
+    if parent != 0 {
+        approvers.push(approval_event(c, parent)?);
+    }
+    if waiting && approvers.into_iter().flatten().any(|(by, _)| by == a.login) {
         announce(c, tid, "ticket.answered", &a.login)?;
     }
     Ok(json!({ "ok": true }))
@@ -1192,6 +1288,60 @@ mod tests {
         set_member(&c, &jane, "SHOP", &json!({"login": "lea", "role": "contributor"})).unwrap();
         set_member(&c, &jane, "SHOP", &json!({"login": "tom", "role": "reader"})).unwrap();
         c
+    }
+
+    #[test]
+    fn an_approved_ticket_is_split_by_whoever_took_it_never_widened() {
+        let c = setup();
+        let (jane, lea) = (who("jane", true), who("lea", false));
+        set_member(&c, &jane, "SHOP", &json!({"login": "max", "role": "contributor"})).unwrap();
+        let max = who("max", false);
+        let kid = |by: &Actor, parent: &str, state: &str| {
+            create_ticket(&c, by, "SHOP", &json!({"title": "Part", "parent": parent, "state": state, "agent": "dev"}))
+        };
+        // SHOP-1 approved by jane, SHOP-2 only proposed
+        create_ticket(&c, &jane, "SHOP", &json!({"title": "Epic", "state": "todo"})).unwrap();
+        create_ticket(&c, &lea, "SHOP", &json!({"title": "Idea"})).unwrap();
+        // not taken yet: no approved sub-ticket, a proposal is fine
+        assert_eq!(kid(&lea, "SHOP-1", "todo").unwrap_err().0, 403);
+        update_ticket(&c, &lea, "SHOP-1", &json!({"state": "in_progress", "assignee": "lea"})).unwrap();
+        // taken by lea: her sub-tickets are approved with it, not those of max
+        assert_eq!(kid(&lea, "SHOP-1", "todo").unwrap()["id"], "SHOP-3");
+        assert_eq!(kid(&max, "SHOP-1", "todo").unwrap_err().0, 403);
+        // a proposal never covers anything; one level only; same project only
+        assert_eq!(kid(&lea, "SHOP-2", "todo").unwrap_err().0, 403);
+        assert_eq!(kid(&lea, "SHOP-3", "todo").unwrap_err().0, 400);
+        assert_eq!(kid(&lea, "BLOG-1", "todo").unwrap_err().0, 400);
+        // the sub-ticket is approved and frozen, its role too
+        let t = ticket_view(&c, &lea, "SHOP-3").unwrap();
+        assert_eq!((t["state"].as_str(), t["parent"].as_str(), t["agent"].as_str()), (Some("todo"), Some("SHOP-1"), Some("dev")));
+        assert_eq!(update_ticket(&c, &lea, "SHOP-3", &json!({"agent": "doc"})).unwrap_err().0, 403);
+        assert_eq!(hook_outbox(&c).iter().filter(|h| h.event == "ticket.approved").count(), 2);
+        // a question on the sub-ticket: whoever approved the parent answers it
+        update_ticket(&c, &lea, "SHOP-3", &json!({"state": "waiting"})).unwrap();
+        comment(&c, &jane, "SHOP-3", &json!({"body": "Yes"})).unwrap();
+        assert!(hook_outbox(&c).iter().any(|h| h.event == "ticket.answered" && h.ticket == "SHOP-3"));
+        // the parent shows its progress
+        kid(&lea, "SHOP-1", "todo").unwrap();
+        update_ticket(&c, &jane, "SHOP-3", &json!({"state": "done"})).unwrap();
+        let p = ticket_view(&c, &jane, "SHOP-1").unwrap();
+        assert_eq!((p["progress"]["done"].as_i64(), p["progress"]["total"].as_i64(), p["children"].as_array().unwrap().len()), (Some(1), Some(2), 2));
+        let listed = project(&c, &jane, "SHOP").unwrap();
+        let epic = listed["tickets"].as_array().unwrap().iter().find(|k| k["id"] == "SHOP-1").unwrap().clone();
+        assert_eq!(epic["progress"], json!({"total": 2, "done": 1}));
+        // its text changed by someone else since the approval: covers no more
+        update_ticket(&c, &who("root", true), "SHOP-1", &json!({"description": "more"})).unwrap();
+        assert_eq!(kid(&lea, "SHOP-1", "todo").unwrap_err().0, 403);
+        // at most MAX_CHILDREN
+        for _ in 2..MAX_CHILDREN {
+            kid(&jane, "SHOP-1", "backlog").unwrap();
+        }
+        assert_eq!(kid(&jane, "SHOP-1", "backlog").unwrap_err().0, 400);
+        // cancelling the parent cancels what is still open
+        update_ticket(&c, &jane, "SHOP-1", &json!({"state": "cancelled"})).unwrap();
+        let p = ticket_view(&c, &jane, "SHOP-1").unwrap();
+        let states: Vec<&str> = p["children"].as_array().unwrap().iter().map(|k| k["state"].as_str().unwrap()).collect();
+        assert!(states.iter().all(|s| *s == "done" || *s == "cancelled") && states.contains(&"done"), "{states:?}");
     }
 
     #[test]

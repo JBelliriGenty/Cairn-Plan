@@ -83,12 +83,56 @@ secret, and "Send a test": the agent answers.
 | `AGENT_MAX_TURNS` | `150` | Turns of one run. |
 | `AGENT_TIMEOUT_MIN` | `60` | Minutes of one run. |
 | `AGENT_LANG` | `en` | Language of the agent's own messages in a ticket, `en` or `fr`. Claude's report follows the language of the ticket. |
+| `AGENT_TEAMS` | `{}` | JSON, the team of each project that has one (see [A team of agents](#a-team-of-agents)). A project without a team is served by the one agent. |
 | `AGENT_SWEEP_MIN` | `60` | Minutes without a call after which the agent looks for tickets a lost call left behind. `0`: only when it starts. |
 | `AGENT_LISTEN` | `0.0.0.0:9095` | Address and port inside the container. |
 
 `/healthz` answers `ok`. The log says what happened to each call:
 `SHOP-52: taken`, `SHOP-52: done, 2 commit(s), 0.84 $`, or why a ticket
 was left alone.
+
+## A team of agents
+
+Instead of one agent for every ticket, a project can have a team: each role
+has its own Cairn Plan account (a contributor of the project, never an
+owner), its own MCP key, model, tools, paths it may change and daily
+budget. Roles are described in [team.json](team.json) (`AGENT_TEAM_FILE` to
+use another file); `AGENT_TEAMS` picks them per project:
+
+```json
+{"SHOP": {"lead": "chef", "roles": {
+  "chef": {"model": "claude-fable-5-2", "usd": 8},
+  "dev": {"model": "claude-opus-5-5", "usd": 15},
+  "doc": {"model": "claude-sonnet-5-5", "usd": 4}}}}
+```
+
+Each role reads its key in `mcp-key-<role>`, next to `PLAN_MCP_KEY_FILE`
+(or `key_file`). On the Cairn Plan side, `mcp_accounts` maps each key to
+its account (`{"agent-dev": "claude-dev"}`), and `cairn-plan member
+<config.json> SHOP claude-dev` adds it to the project.
+
+1. An owner approves a ticket with no agent role: the lead takes it,
+   reads the repository (no Bash, no writing) and cuts it into sub-tickets
+   with `create_subticket`, one per role. The parent's approval covers
+   them: they start "To do", and stay inside the parent (Cairn Plan checks
+   who cuts them and that the parent's text did not change since; the
+   agent that builds one is told the parent is its frame and asks when a
+   part goes beyond it).
+2. Each sub-ticket goes to the agent of its role, which works as the one
+   agent does, under its own account and model. The files it changed are
+   checked against the `paths` of its role before anything is pushed: a
+   forge grants rights per repository, not per folder, so this check is
+   the limit. A file outside: no push, no pull request, the ticket waits
+   with the list.
+3. A role that `waits` (the writer) starts once the other parts are
+   closed, and finds their branches in its clone (`origin/agent/<id>`).
+4. Once every part is closed, the parent is closed by the lead's account
+   with the list of parts.
+
+A ticket an owner gives a role directly goes to that role, without the
+lead. The log puts the role in front of each line (`[dev] SHOP-71: done,
+1 commit(s), 0.62 $`); each report ends with the role, the model and the
+cost of its run.
 
 ## What the agent trusts
 

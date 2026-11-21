@@ -1,6 +1,6 @@
 [package]
 name = "cairn-plan"
-version = "0.14.0"
+version = "0.16.2"
 edition = "2021"
 rust-version = "1.85"
 description = "Projects and tickets for a small team: one binary, one SQLite file, sign-in left to an authenticating reverse proxy, approval of a ticket reserved to project owners"

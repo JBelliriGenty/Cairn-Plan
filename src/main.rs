@@ -23,10 +23,11 @@ const I18N: &str = include_str!("../www/i18n.js");
 const ICON: &str = include_str!("../www/icon.svg");
 
 /// Every key read from the configuration file (checked against the docs by a test).
-const KEYS: [&str; 19] = [
-    "listen", "trusted_proxies", "require_groups", "admin_groups", "db", "lang", "mcp_keys_file", "mcp_login", "webhook_secrets_file",
+const KEYS: [&str; 22] = [
+    "listen", "trusted_proxies", "require_groups", "admin_groups", "db", "lang", "mcp_keys_file", "mcp_login", "mcp_accounts",
+    "webhook_secrets_file",
     "public_url", "smtp_host", "smtp_port", "smtp_credentials_file", "mail_from", "ntfy_url", "ntfy_token_file", "ntfy_topics",
-    "agent_hook_url", "agent_hook_secret_file",
+    "agent_hook_url", "agent_hook_secret_file", "oidc_issuer", "oidc_client_id",
 ];
 
 struct Config {
@@ -38,8 +39,13 @@ struct Config {
     lang: String,
     /// (name, key) pairs allowed on /mcp; empty: no MCP server.
     mcp_keys: Vec<(String, String)>,
-    /// The account every MCP call runs as.
+    /// The account MCP calls made with a key run as, unless mcp_accounts names another for the key.
     mcp_login: String,
+    /// (issuer, client id) of the OpenID provider whose access tokens are
+    /// accepted on /mcp: such a call runs as the person signed in.
+    oidc: Option<(String, String)>,
+    /// Key name -> account: one account per agent role.
+    mcp_accounts: HashMap<String, String>,
     /// (name, secret) pairs that may sign a forge webhook; empty: no webhook.
     webhook_secrets: Vec<(String, String)>,
     /// Where notifications go besides the page (notify.rs).
@@ -94,6 +100,11 @@ impl Config {
             lang: s("lang", ""),
             mcp_keys: secrets_file(&v, "mcp_keys_file"),
             mcp_login: s("mcp_login", "claude"),
+            oidc: v["oidc_issuer"].as_str().map(|i| (i.trim_end_matches('/').to_string(), s("oidc_client_id", ""))),
+            mcp_accounts: v["mcp_accounts"]
+                .as_object()
+                .map(|o| o.iter().filter_map(|(k, l)| l.as_str().map(|l| (k.clone(), l.to_string()))).collect())
+                .unwrap_or_default(),
             webhook_secrets: secrets_file(&v, "webhook_secrets_file"),
             files: std::path::Path::new(&s("db", "/var/lib/cairn-plan/plan.db")).with_file_name("files"),
             agent_hook: (s("agent_hook_url", ""), secret("agent_hook_secret_file")),
@@ -123,7 +134,12 @@ impl Config {
             },
         };
         assert!(store::valid_login(&cfg.mcp_login), "mcp_login is not a valid login");
+        assert!(cfg.mcp_accounts.values().all(|l| store::valid_login(l)), "mcp_accounts holds an invalid login");
         assert!(!cfg.trusted_proxies.is_empty(), "trusted_proxies is empty: nobody could sign in");
+        if let Some((_, client)) = &cfg.oidc {
+            assert!(!client.is_empty(), "oidc_issuer is set without oidc_client_id");
+            assert!(!cfg.outside.public_url.is_empty(), "oidc_issuer is set without public_url");
+        }
         cfg
     }
 }
@@ -158,17 +174,140 @@ fn ct_eq(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// MCP endpoint (mcp.rs): a key in "Authorization: Bearer", no proxy
-/// identity. The key says which client calls; the account is always mcp_login.
+/// Address of the metadata that tells an MCP client where to sign in (RFC 9728).
+fn resource_metadata_url(cfg: &Config) -> String {
+    format!("{}/.well-known/oauth-protected-resource/mcp", cfg.outside.public_url)
+}
+
+/// Protected resource metadata (RFC 9728): /mcp, and the provider that issues its tokens.
+fn resource_metadata(cfg: &Config) -> Option<Value> {
+    let (issuer, _) = cfg.oidc.as_ref()?;
+    Some(json!({
+        "resource": format!("{}/mcp", cfg.outside.public_url),
+        "authorization_servers": [issuer],
+        "scopes_supported": ["openid", "profile", "email", "groups", "offline_access"],
+        "bearer_methods_supported": ["header"],
+    }))
+}
+
+/// The claims of a JWT, read without checking its signature: used only once
+/// the provider has accepted that very token. Null when it is not a JWT.
+fn jwt_claims(token: &str) -> Value {
+    let Some(part) = token.split('.').nth(1) else { return Value::Null };
+    let (mut bits, mut n, mut out) = (0u32, 0, Vec::new());
+    for c in part.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => break,
+        };
+        bits = bits << 6 | v as u32;
+        n += 6;
+        if n >= 8 {
+            n -= 8;
+            out.push((bits >> n) as u8);
+            bits &= (1 << n) - 1;
+        }
+    }
+    serde_json::from_slice(&out).unwrap_or(Value::Null)
+}
+
+/// Who an access token belongs to, from what the provider's userinfo
+/// endpoint answered: (actor, name, e-mail), or why it is refused. The token
+/// must be meant for this server: "aud" holds oidc_client_id or the address
+/// of /mcp (the resource the client asked for, RFC 8707), or "azp" /
+/// "client_id" is oidc_client_id. A token another application received for
+/// the same person is not enough.
+fn token_owner(cfg: &Config, info: &Value) -> Result<(Actor, String, String), String> {
+    let (_, client) = cfg.oidc.as_ref().ok_or("no OpenID provider")?;
+    let resource = format!("{}/mcp", cfg.outside.public_url);
+    let ours = |v: &Value| v == client.as_str() || v == resource.as_str();
+    let aud = &info["aud"];
+    let for_us = ours(aud) || aud.as_array().is_some_and(|a| a.iter().any(ours)) || info["azp"] == client.as_str() || info["client_id"] == client.as_str();
+    if !for_us {
+        return Err(format!("token not issued to {client} (aud {aud}, azp {}, client_id {})", info["azp"], info["client_id"]));
+    }
+    let login = info["preferred_username"].as_str().unwrap_or("").to_lowercase();
+    if !store::valid_login(&login) {
+        return Err("no valid preferred_username (scope profile)".into());
+    }
+    let groups: Vec<&str> = info["groups"].as_array().map(|g| g.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
+    let in_any = |wanted: &[String]| groups.iter().any(|g| wanted.iter().any(|w| w == g));
+    if !cfg.require_groups.is_empty() && !in_any(&cfg.require_groups) {
+        return Err(format!("{login} is in none of require_groups"));
+    }
+    let admin = in_any(&cfg.admin_groups);
+    let text = |k: &str| info[k].as_str().unwrap_or("").to_string();
+    Ok((Actor { login, admin }, text("name"), text("email")))
+}
+
+/// Asks the provider who holds this access token (its userinfo endpoint,
+/// found once in its discovery document). The provider checks that the
+/// token is genuine, unexpired and not revoked.
+// ponytail: one call to the provider per MCP request; cache by token if it ever shows in latency
+fn userinfo(issuer: &str, token: &str) -> Result<Value, String> {
+    static ENDPOINT: OnceLock<String> = OnceLock::new();
+    let get = |url: &str| ureq::get(url).timeout(std::time::Duration::from_secs(10));
+    let endpoint = match ENDPOINT.get() {
+        Some(e) => e.clone(),
+        None => {
+            let raw = get(&format!("{issuer}/.well-known/openid-configuration")).call().map_err(|e| e.to_string())?.into_string().map_err(|e| e.to_string())?;
+            let found = serde_json::from_str::<Value>(&raw).ok().and_then(|d| d["userinfo_endpoint"].as_str().map(String::from));
+            ENDPOINT.get_or_init(|| found.unwrap_or_default()).clone()
+        }
+    };
+    if endpoint.is_empty() {
+        return Err("the provider announces no userinfo_endpoint".into());
+    }
+    let raw = get(&endpoint).set("Authorization", &format!("Bearer {token}")).call().map_err(|e| e.to_string())?.into_string().map_err(|e| e.to_string())?;
+    serde_json::from_str(&raw).map_err(|e| e.to_string())
+}
+
+/// MCP endpoint (mcp.rs), no proxy identity: "Authorization: Bearer" holds
+/// either a key of mcp_keys_file (the call runs as the account mcp_accounts
+/// gives the key, mcp_login by default; the key names the client in the log) or an access token from the OpenID provider (the
+/// call runs as the person signed in, with their rights).
 fn serve_mcp(cfg: &Config, mut r: Request) {
-    if cfg.mcp_keys.is_empty() {
+    if cfg.mcp_keys.is_empty() && cfg.oidc.is_none() {
         return respond(r, 404, "not found".into(), "text/plain");
     }
     let sent = header(&r, "Authorization");
-    let key = sent.strip_prefix("Bearer ").unwrap_or("");
-    let Some((client, _)) = cfg.mcp_keys.iter().find(|(_, k)| ct_eq(k, key)) else {
+    let key = sent.strip_prefix("Bearer ").unwrap_or("").trim();
+    let caller = match cfg.mcp_keys.iter().find(|(_, k)| ct_eq(k, key)) {
+        Some((client, _)) => {
+            let login = cfg.mcp_accounts.get(client).unwrap_or(&cfg.mcp_login).clone();
+            Some((client.clone(), Actor { login, admin: false }, String::new(), String::new()))
+        }
+        None => match &cfg.oidc {
+            Some((issuer, _)) if !key.is_empty() => match userinfo(issuer, key).and_then(|mut info| {
+                // Authelia's userinfo carries no audience: take it from the token itself
+                let claims = jwt_claims(key);
+                for k in ["aud", "azp", "client_id"] {
+                    if info[k].is_null() && info.is_object() {
+                        info[k] = claims[k].clone();
+                    }
+                }
+                token_owner(cfg, &info)
+            }) {
+                Ok((who, name, email)) => Some((format!("oauth {}", who.login), who, name, email)),
+                Err(e) => {
+                    eprintln!("mcp: access token refused: {e}");
+                    None
+                }
+            },
+            _ => None,
+        },
+    };
+    let Some((client, who, name, email)) = caller else {
+        let challenge = match cfg.oidc {
+            Some(_) => format!("Bearer resource_metadata=\"{}\"", resource_metadata_url(cfg)),
+            None => "Bearer".to_string(),
+        };
         let _ = r.respond(
-            Response::from_string("unauthorized").with_status_code(401).with_header(Header::from_bytes("WWW-Authenticate", "Bearer").unwrap()),
+            Response::from_string("unauthorized").with_status_code(401).with_header(Header::from_bytes("WWW-Authenticate", challenge.as_bytes()).unwrap()),
         );
         return;
     };
@@ -182,14 +321,13 @@ fn serve_mcp(cfg: &Config, mut r: Request) {
         let e = json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "parse error"}});
         return respond(r, 400, e.to_string(), "application/json");
     };
-    let who = Actor { login: cfg.mcp_login.clone(), admin: false };
     if req["method"] == "tools/call" {
         let a = &req["params"]["arguments"];
         let target = a["id"].as_str().or(a["project"].as_str()).unwrap_or("");
         eprintln!("mcp {client}: {} {target}", req["params"]["name"].as_str().unwrap_or("?"));
     }
     let c = DB.get().expect("database").lock().unwrap_or_else(|e| e.into_inner());
-    store::seen(&c, &who.login, "", "");
+    store::seen(&c, &who.login, &name, &email);
     let out = mcp::handle(&c, &who, &req);
     drop(c);
     match out {
@@ -442,6 +580,12 @@ fn handle(cfg: &'static Config, mut r: Request) {
     if path == "/mcp" {
         return serve_mcp(cfg, r);
     }
+    if path == "/.well-known/oauth-protected-resource" || path == "/.well-known/oauth-protected-resource/mcp" {
+        return match resource_metadata(cfg) {
+            Some(m) => respond(r, 200, m.to_string(), "application/json"),
+            None => respond(r, 404, "not found".into(), "text/plain"),
+        };
+    }
     if path == "/hooks/git" {
         return serve_hook(cfg, r);
     }
@@ -522,6 +666,23 @@ fn handle(cfg: &'static Config, mut r: Request) {
 
 fn main() {
     let path = std::env::args().nth(1).expect("usage: cairn-plan /etc/cairn-plan/config.json");
+    if path == "member" {
+        // cairn-plan member <config.json> <KEY> <login>: an agent account joins a project, as a
+        // contributor and nothing more (an owner could approve its own work)
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        let [config, key, login] = args.as_slice() else {
+            panic!("usage: cairn-plan member <config.json> <KEY> <login>");
+        };
+        let root = Actor { login: "cairn-plan".into(), admin: true };
+        match store::set_member(&store::open(&Config::load(config).db), &root, key, &json!({"login": login, "role": "contributor"})) {
+            Ok(_) => println!("{login}: contributor of {key}"),
+            Err((_, e)) => {
+                eprintln!("member failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if path == "import" {
         // cairn-plan import <config.json> <draft.json> <space> <login>
         let args: Vec<String> = std::env::args().skip(2).collect();
@@ -578,6 +739,41 @@ mod tests {
         assert_eq!(super::kind("a.PNG"), ("image/png", "inline"));
         assert_eq!(super::kind("page.html"), ("application/octet-stream", "attachment"));
         assert_eq!(super::kind("drawing.svg"), ("application/octet-stream", "attachment"));
+    }
+
+    fn oidc_config() -> super::Config {
+        let dir = std::env::temp_dir().join(format!("cairn-plan-oidc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("config.json");
+        let cfg = serde_json::json!({"trusted_proxies": ["127.0.0.1"], "require_groups": ["members"], "admin_groups": ["admins"],
+            "public_url": "https://plan.example.org/", "oidc_issuer": "https://auth.example.org/", "oidc_client_id": "cairn-plan-mcp"});
+        std::fs::write(&f, cfg.to_string()).unwrap();
+        super::Config::load(f.to_str().unwrap())
+    }
+
+    #[test]
+    fn access_token_runs_as_its_owner() {
+        let cfg = oidc_config();
+        let m = super::resource_metadata(&cfg).unwrap();
+        assert_eq!(m["resource"], "https://plan.example.org/mcp");
+        assert_eq!(m["authorization_servers"][0], "https://auth.example.org");
+        assert_eq!(super::resource_metadata_url(&cfg), "https://plan.example.org/.well-known/oauth-protected-resource/mcp");
+        let info = |aud: serde_json::Value, groups: &[&str]| {
+            serde_json::json!({"aud": aud, "preferred_username": "Alice", "groups": groups, "name": "Alice B", "email": "j@example.org"})
+        };
+        let (who, name, email) = super::token_owner(&cfg, &info(serde_json::json!(["cairn-plan-mcp"]), &["members", "admins"])).unwrap();
+        assert_eq!((who.login.as_str(), who.admin, name.as_str(), email.as_str()), ("alice", true, "Alice B", "j@example.org"));
+        let (who, _, _) = super::token_owner(&cfg, &info(serde_json::json!("cairn-plan-mcp"), &["members"])).unwrap();
+        assert!(!who.admin);
+        // audience = the resource asked for (RFC 8707), read in the token (Authelia's JWT access tokens)
+        let claims = super::jwt_claims("eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiBbImh0dHBzOi8vcGxhbi5leGFtcGxlLm9yZy9tY3AiXSwgImNsaWVudF9pZCI6ICJjYWlybi1wbGFuLW1jcCIsICJuIjogIsOpIn0.c2ln");
+        assert_eq!((claims["aud"][0].as_str(), claims["client_id"].as_str(), claims["n"].as_str()), (Some("https://plan.example.org/mcp"), Some("cairn-plan-mcp"), Some("é")));
+        assert!(super::jwt_claims("opaque-token").is_null());
+        assert!(super::token_owner(&cfg, &info(serde_json::json!(["https://plan.example.org/mcp"]), &["members"])).is_ok());
+        // a token issued to another application, someone outside require_groups, no login
+        assert!(super::token_owner(&cfg, &info(serde_json::json!(["other-app"]), &["members"])).is_err());
+        assert!(super::token_owner(&cfg, &info(serde_json::json!(["cairn-plan-mcp"]), &["staff"])).is_err());
+        assert!(super::token_owner(&cfg, &serde_json::json!({"aud": "cairn-plan-mcp", "groups": ["members"]})).is_err());
     }
 
     #[test]

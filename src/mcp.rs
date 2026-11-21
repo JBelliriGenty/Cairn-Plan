@@ -1,10 +1,12 @@
 //! MCP server (Model Context Protocol over HTTP, plain JSON answers): lets
 //! an AI agent work on approved tickets.
 //!
-//! Every call runs as one account (configuration key "mcp_login"), whoever
-//! holds the key. That account is an ordinary member: it sees the projects
-//! it was added to and obeys the rules of store.rs, so as a contributor it
-//! can neither approve a ticket nor change the text of an approved one.
+//! A call made with a key runs as one account (configuration key
+//! "mcp_login"), whoever holds the key. That account is an ordinary member:
+//! it sees the projects it was added to and obeys the rules of store.rs, so
+//! as a contributor it can neither approve a ticket nor change the text of
+//! an approved one. A call made with an OAuth access token runs as the
+//! person signed in (main.rs, serve_mcp), under the same rules.
 
 use crate::store::{self, Actor, R};
 use rusqlite::Connection;
@@ -51,6 +53,12 @@ fn tools() -> Value {
              "project": {"type": "string", "description": "Project key, e.g. SHOP"},
              "title": {"type": "string", "description": "One line: what is asked"},
              "description": {"type": "string", "description": "Details: goal, context, what done looks like"}}}},
+        {"name": "create_subticket", "description": "Split a ticket you took (\"in_progress\", assigned to this account) into sub-tickets of the same project. Its approval covers them: they start \"todo\", and the agent of their role takes them. Only parts of what the parent asks, never more: whoever builds a sub-ticket checks it against the parent. One level, at most 8 per ticket.",
+         "inputSchema": {"type": "object", "required": ["parent", "title", "role"], "properties": {
+             "parent": {"type": "string", "description": "Id of the ticket being split, e.g. SHOP-70"},
+             "title": {"type": "string", "description": "One line: this part of the parent"},
+             "description": {"type": "string", "description": "What to do, where, and what done looks like"},
+             "role": {"type": "string", "description": "Who builds it, a role of this project's agents, e.g. dev or doc"}}}},
         {"name": "ask_owner", "description": "Ask a project owner for what only they can do or decide (a secret, an account, a firewall change, a choice): opens a ticket in state \"waiting\", assigned to them, who is notified. They answer in a comment, then move the ticket to \"done\" (nothing more for you) or to \"todo\" (you carry on as the ticket says).",
          "inputSchema": {"type": "object", "required": ["project", "title", "question"], "properties": {
              "project": {"type": "string", "description": "Project key, e.g. SHOP"},
@@ -81,6 +89,11 @@ fn approval(ticket: &Value) -> Value {
 fn view(c: &Connection, who: &Actor, id: &str) -> R<Value> {
     let mut t = store::ticket_view(c, who, id)?;
     t["approval"] = approval(&t);
+    // a sub-ticket is approved by delegation: the approval it stands on is the parent's
+    if let (Some(parent), true) = (t["parent"].as_str().filter(|p| !p.is_empty()).map(String::from), t["approval"].is_object()) {
+        let p = store::ticket_view(c, who, &parent)?;
+        t["approval"]["parent"] = json!({"id": parent, "title": p["title"], "description": p["description"], "approval": approval(&p)});
+    }
     Ok(t)
 }
 
@@ -134,6 +147,13 @@ fn call(c: &Connection, who: &Actor, tool: &str, a: &Value) -> R<Value> {
             arg(a, "project")?,
             &json!({"title": arg(a, "title")?, "description": a["description"].as_str().unwrap_or("")}),
         ),
+        "create_subticket" => {
+            let parent = arg(a, "parent")?;
+            let key = parent.rsplit_once('-').map_or("", |(k, _)| k);
+            let sub = json!({"title": arg(a, "title")?, "description": a["description"].as_str().unwrap_or(""),
+                             "agent": arg(a, "role")?, "parent": parent, "state": "todo"});
+            store::create_ticket(c, who, key, &sub)
+        }
         "ask_owner" => {
             let key = arg(a, "project")?;
             let owner = match a["owner"].as_str().filter(|s| !s.is_empty()) {
@@ -224,7 +244,7 @@ mod tests {
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
         assert!(handle(&c, &claude, &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).is_none());
         let list = handle(&c, &claude, &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 10);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 11);
         assert_eq!(handle(&c, &claude, &json!({"jsonrpc": "2.0", "id": 3, "method": "nope"})).unwrap()["error"]["code"], -32601);
 
         // it only sees the projects it was added to
@@ -252,6 +272,11 @@ mod tests {
         assert!(refused(&c, &claude, "finish_ticket", json!({"id": "SHOP-2", "report": "done"})).contains("take it first"));
         assert_eq!(ok(&c, &claude, "take_ticket", json!({"id": "SHOP-2"}))["state"], "in_progress");
         ok(&c, &claude, "add_link", json!({"id": "SHOP-2", "url": "https://git.example/pulls/7", "title": "PR 7"}));
+        // split while taken: the part is approved by delegation, standing on the parent's approval
+        let part = ok(&c, &claude, "create_subticket", json!({"parent": "SHOP-2", "title": "Part", "role": "dev"}));
+        let p = ok(&c, &claude, "get_ticket", json!({"id": part["id"]}));
+        assert_eq!((p["state"].as_str(), p["approval"]["by"].as_str()), (Some("todo"), Some("claude")));
+        assert_eq!((p["approval"]["parent"]["id"].as_str(), p["approval"]["parent"]["approval"]["by"].as_str()), (Some("SHOP-2"), Some("jane")));
         let done = ok(&c, &claude, "finish_ticket", json!({"id": "SHOP-2", "report": "Fait : PR 7.", "minutes": 45}));
         assert_eq!((done["state"].as_str(), done["comments"][0]["author"].as_str()), (Some("done"), Some("claude")));
         assert_eq!((done["time"]["logged"].as_i64(), done["work"][0]["login"].as_str()), (Some(45), Some("claude")));

@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.16.2
+
+- Authelia's userinfo answers with no audience at all: the audience and
+  client id of an OAuth access token are now read in the token itself (a
+  JWT), once the provider has accepted it. claude.ai was still refused
+  after sign-in with 0.16.1.
+
+## 0.16.1
+
+- An OAuth access token whose audience is the address of `/mcp` (the
+  resource the MCP client asked for, as Authelia answers on userinfo) is
+  accepted; only the client id was before, so claude.ai was refused after
+  sign-in. A refusal now logs the audience it saw.
+
+## 0.16.0
+
+A team of agents per project, each role with its own account, model,
+tools, paths and budget. The approval of a project owner on a parent
+ticket covers the sub-tickets the team lead cuts from it, never more.
+
+- Sub-tickets: a ticket may have a parent of the same project (one level,
+  8 at most). Created "To do" by whoever took the parent, a sub-ticket is
+  approved with it, as long as the parent was approved and its text not
+  changed since by someone else. Its text and its agent role are frozen
+  like any approved ticket. Cancelling the parent cancels the sub-tickets
+  still open. A progress bar (sub-tickets done out of those not cancelled)
+  on the ticket page, the board card and the list.
+- Field "Agent" on a ticket: the role of the agent that builds it (`dev`,
+  `doc`); empty: the team lead.
+- MCP: `create_subticket`; `get_ticket` of a sub-ticket gives the approval
+  of its parent. `mcp_accounts` maps a key to its own account, one per
+  role. `cairn-plan member <config> <KEY> <login>` adds an account to a
+  project as a contributor.
+- Agent: `AGENT_TEAMS` and [agent/team.json](agent/team.json). The lead
+  (Claude Code without Bash nor writing) splits the ticket and builds
+  nothing; each sub-ticket goes to the agent of its role, under its
+  account and model, with the parent as the frame it may not go beyond;
+  the files it changed are checked against the paths of its role before
+  any push; a role that "waits" (the writer) starts once the other parts
+  are closed and reads their branches; the parent is closed once every
+  part is. One daily budget per role, the role in front of each line of
+  the log, its model and cost at the end of each report.
+
+## 0.15.0
+
+Sign-in with OAuth on the MCP server, for remote clients such as
+claude.ai custom connectors and Claude Cowork.
+
+- New keys `oidc_issuer` and `oidc_client_id`: `/mcp` then also accepts
+  an access token from that OpenID Connect provider, and the call runs as
+  the person signed in (their projects, their role in each, administrator
+  if in `admin_groups`) instead of the fixed `mcp_login` account. Keys of
+  `mcp_keys_file` work as before.
+- `/.well-known/oauth-protected-resource` (RFC 9728) names the provider,
+  and the 401 of `/mcp` points to it (`resource_metadata`).
+- A token is checked with the provider's userinfo endpoint and must have
+  been issued to `oidc_client_id`; a refusal is logged with its reason.
+
 ## 0.14.0
 
 First version published on GitHub, with images for the server and the

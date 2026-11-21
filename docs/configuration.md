@@ -27,7 +27,10 @@ else in one SQLite file.
 | `db` | `/var/lib/cairn-plan/plan.db` | The SQLite file. Its folder must be writable by the process (user `nobody` in the image). |
 | `lang` | browser's | Default language of the page, `en` or `fr`. Each person can switch. |
 | `mcp_keys_file` | none | File of the keys accepted on `/mcp`, one `name:key` per line (key of 32 characters or more; lines starting with `#` are ignored). Without it there is no MCP server (`/mcp` answers 404). |
-| `mcp_login` | `claude` | The account every MCP call runs as, whichever key is used. Add it to a project like any member. |
+| `mcp_login` | `claude` | The account MCP calls run as, unless `mcp_accounts` names another for the key. Add it to a project like any member. |
+| `mcp_accounts` | `{}` | One account per key, by key name: `{"agent-dev": "claude-dev"}`, for a team of agents where each role has its own account (see the agent's README). Add each account to its project as a contributor: `cairn-plan member <config.json> <KEY> <login>`. |
+| `oidc_issuer` | none | OpenID Connect provider (`https://auth.example.org`) whose access tokens are accepted on `/mcp`: a call made with such a token runs as the person signed in (see [Sign-in with OAuth](#sign-in-with-oauth)). Needs `public_url` in the file. |
+| `oidc_client_id` | none, required with `oidc_issuer` | The client registered at the provider for MCP clients; a token issued to any other client is refused. |
 | `public_url` | none | Address people open Cairn Plan at (`https://plan.example.org`), for the link in a notification. |
 | `smtp_host` | none | SMTP server for notifications by e-mail. Without it no e-mail is sent. |
 | `smtp_port` | `587` | `465`: TLS from the start; any other port: STARTTLS (required). |
@@ -82,11 +85,15 @@ rule). `trusted_proxies` is the last line: a direct request is refused.
 
 `/mcp` speaks the Model Context Protocol over HTTP (JSON answers, no
 stream) and is the one path that does not go through the proxy's sign-in:
-the caller sends `Authorization: Bearer <key>`, a key of `mcp_keys_file`.
-Route it at the proxy without `forwardAuth`, with a rate limit.
+the caller sends `Authorization: Bearer <key>`, a key of `mcp_keys_file`,
+or an OAuth access token (below). Route it at the proxy without
+`forwardAuth`, with a rate limit, together with
+`/.well-known/oauth-protected-resource` and
+`/.well-known/oauth-protected-resource/mcp`.
 
 The key only says which client calls (its name is written to the log with
-each tool call). The account is always `mcp_login`, an ordinary member:
+each tool call) and, through `mcp_accounts`, which account it is
+(`mcp_login` by default). That account is an ordinary member:
 it sees the projects it was added to and, as a contributor, can neither
 approve a ticket nor change the text of an approved one. Do not make it
 an owner of a project, nor a member of `admin_groups`: it could then
@@ -98,7 +105,53 @@ since), `take_ticket`, `wait_ticket` (a question: the ticket waits),
 `comment_ticket`, `add_link`, `finish_ticket` (with the minutes worked),
 `propose_ticket`, `ask_owner` (a question to a project owner: a ticket
 created "waiting" and assigned to them; it shows first in their « For me »
-page, where they answer and move it to "done" or "todo").
+page, where they answer and move it to "done" or "todo"),
+`create_subticket` (splits a ticket this account took into sub-tickets of
+the same project, with a role each).
+
+A sub-ticket created by whoever took its parent starts "todo": the
+parent's approval covers it, as long as the parent is in progress, was
+approved, and its text was not changed since by someone else. One level,
+at most 8 per ticket; its text and role are frozen like any approved
+ticket, and cancelling the parent cancels the sub-tickets still open. The
+parent shows a progress bar (sub-tickets done out of those not
+cancelled).
+
+### Sign-in with OAuth
+
+With `oidc_issuer`, a remote MCP client that signs people in itself
+(claude.ai custom connectors, and so Claude Cowork; any client following
+the MCP authorization spec) connects without a key, and every call runs
+as the person who signed in, with their rights: the projects they are a
+member of, their role in each, administrator if they are in
+`admin_groups`. Keys keep working as before.
+
+1. At the provider, register a confidential client (`oidc_client_id`)
+   with the redirect URIs of the MCP client (for claude.ai:
+   `https://claude.ai/api/mcp/auth_callback` and
+   `https://claude.com/api/mcp/auth_callback`), grant types
+   `authorization_code` and `refresh_token`, PKCE, scopes `openid profile
+   email groups offline_access`, and `<public_url>/mcp` as an allowed
+   audience (clients send it as the `resource` parameter, RFC 8707).
+   Restrict who may use it at the provider if not everyone should.
+2. Set `oidc_issuer`, `oidc_client_id` and `public_url`.
+3. In the MCP client, add `<public_url>/mcp` with this client id and its
+   secret.
+
+Without a valid key, `/mcp` answers 401 with `WWW-Authenticate: Bearer
+resource_metadata="<public_url>/.well-known/oauth-protected-resource/mcp"`;
+that document (RFC 9728) names `oidc_issuer` as the authorization server,
+where the client finds the provider's endpoints. Cairn Plan asks the
+provider's `userinfo_endpoint` (from its discovery document) about each
+token: the provider vouches that it is genuine and unexpired. The answer
+must be meant for Cairn Plan (`aud` lists `oidc_client_id` or
+`<public_url>/mcp`, or `azp` is `oidc_client_id`) and carry a
+`preferred_username` (the login); `groups` are matched against `require_groups` and `admin_groups`
+as on the page, `name` and `email` are shown next to the login. A refused
+token is written to the log with the reason, never the token. Written for
+Authelia 4.39: its userinfo carries no audience, so `aud` and `client_id`
+are read in the access token, a JWT (set `access_token_signed_response_alg:
+RS256` on the client), once userinfo has accepted it.
 
 ## Notifications
 

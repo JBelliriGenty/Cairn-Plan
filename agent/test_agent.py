@@ -120,3 +120,48 @@ assert agent.asked({"events": [ev(100, "in_progress"), ev(130, "waiting"), ev(13
 assert not agent.asked({"events": [ev(50, "waiting"), ev(100, "in_progress")]}, 100)
 said = agent.say_breaches({"lines": 401, "files": ["go.mod"]}, rules, agent.TEXT["fr"]["breach"])
 assert said == "401 lignes modifiées, 400 au plus; fichiers qu'il ne peut pas modifier : go.mod", said
+
+# a team: each role completed by team.json, with its own key; the lead must be one of them
+known = json.load(open(os.path.join(agent.DIR, "team.json"), encoding="utf-8"))
+with tempfile.TemporaryDirectory() as d:
+    for n in ("chef", "dev", "doc"):
+        open(os.path.join(d, n), "w").write(f"key-of-{n}\n")
+    given = {"SHOP": {"lead": "chef", "roles": {n: {"model": "m-" + n, "usd": 2, "key_file": os.path.join(d, n)} for n in ("chef", "dev", "doc")}}}
+    team = agent.teams(given, known)["SHOP"]
+    assert team["roles"]["doc"]["key"] == "key-of-doc" and team["roles"]["doc"]["paths"] == ["*.md", "docs/*"]
+    assert team["roles"]["chef"]["splits"] and "Bash" in team["roles"]["chef"]["denied"] and team["roles"]["chef"]["paths"] == []
+    assert "paths" not in team["roles"]["dev"] and team["roles"]["dev"]["model"] == "m-dev"
+    for broken in ({"SHOP": {"lead": "boss", "roles": given["SHOP"]["roles"]}},
+                   {"SHOP": {"lead": "chef", "roles": {"chef": {"key_file": os.path.join(d, "none")}}}}):
+        try:
+            agent.teams(broken, known)
+            raise AssertionError("a broken team was accepted")
+        except SystemExit:
+            pass
+    # the role is the ticket's agent field, else the lead's
+    assert agent.role_for({"agent": "doc"}, team) == "doc" and agent.role_for({"agent": ""}, team) == "chef"
+
+# the paths of a role: the writer only touches documentation, the lead nothing
+change = "3\t1\tdocs/guide.md\0" + "1\t0\tREADME.md\0" + "2\t2\tapi/main.go\0"
+assert agent.outside(["*.md", "docs/*"], change) == ["api/main.go"]
+assert agent.outside([], change) == ["docs/guide.md", "README.md", "api/main.go"]
+assert agent.outside(["*"], change) == []
+
+# the writer waits for the other roles of the same parent, not for its own
+parent = {"id": "SHOP-70", "title": "Epic", "description": "All of it", "children": [
+    {"id": "SHOP-71", "title": "Code", "agent": "dev", "state": "in_progress"},
+    {"id": "SHOP-72", "title": "Doc", "agent": "doc", "state": "todo"},
+    {"id": "SHOP-73", "title": "More doc", "agent": "doc", "state": "todo"}]}
+assert agent.waits_for(parent, "SHOP-72") == ["SHOP-71"]
+parent["children"][0]["state"] = "done"
+assert agent.waits_for(parent, "SHOP-72") == []
+said = agent.summary(parent, agent.TEXT["fr"])
+assert "SHOP-71 (dev) : Code, terminé" in said and said.startswith("Tous les sous-tickets"), said
+
+# a sub-ticket's request carries its parent, the frame it may not go beyond
+sub = {"id": "SHOP-72", "title": "Doc", "description": "Document it", "comments": []}
+prompt = agent.fill("{{ROLE}}\n<request>{{REQUEST}}</request>\n<data>{{DATA}}</data>\n{{ROLES}}", sub, parent, "Writer.", {"dev": "Developer"})
+request, data = prompt.split("<data>")
+assert '"part_of"' in request and "All of it" in request and '"other_parts"' in data and "SHOP-71" in data
+assert prompt.startswith("Writer.") and '"dev": "Developer"' in prompt
+assert "part_of" not in agent.fill("<request>{{REQUEST}}</request>", sub)

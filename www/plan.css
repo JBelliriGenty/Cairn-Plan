@@ -129,6 +129,13 @@ button.quiet:hover { color: var(--fg); }
 .kcard:hover { text-decoration: none; border-color: var(--control); }
 .kcard strong { font-weight: 600; }
 .kcard[draggable="true"] { cursor: grab; }
+.pill.agent { background: color-mix(in srgb, var(--accent) 14%, var(--bg)); color: var(--accent); }
+.progress { display: inline-flex; align-items: center; gap: 6px; vertical-align: middle; }
+.progress .bar { display: inline-block; width: 80px; height: 6px; border-radius: 99px; background: var(--track); overflow: hidden; }
+.progress .bar > span { display: block; height: 100%; background: var(--ok); }
+.kcard .progress { display: flex; }
+.kcard .progress .bar { flex: 1; }
+td .progress { margin-left: 8px; }
 .kmeta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
 .pill.prio-urgent { background: var(--bad-bg); color: var(--bad-ink); }
 .pill.prio-high { background: var(--warn-bg); color: var(--warn-ink); }

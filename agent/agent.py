@@ -12,6 +12,12 @@ Two users. This program (root) holds the secrets of the forge and of the
 webhook. Claude Code runs as "worker", which sees neither: what it commits
 comes back as a git bundle, a plain file, and never as a repository whose
 configuration or hooks root would run.
+
+A project may have a team instead (AGENT_TEAMS, roles in team.json): each
+role has its own Cairn Plan account and key, model, tools, paths it may
+change and daily budget. The lead splits an approved ticket into
+sub-tickets, one per role, which its approval covers; each is built by the
+agent of its role, and the parent is closed once they all are.
 """
 import base64
 import datetime
@@ -48,7 +54,9 @@ TEXT = {
            "manual": "To be merged by a person, not automatically: {why}.",
            "breach": {"files": "files it may not change: {v}", "binary": "binary files: {v}",
                       "lines": "{v} lines changed, at most {max}", "count": "{v} files changed, at most {max}",
-                      "sql": "a destructive database schema change: {v}"}},
+                      "sql": "a destructive database schema change: {v}", "outside": "files role {role} may not change: {v}"},
+           "nothing": "the project lead created no sub-ticket. Its report:\n\n{report}",
+           "closed": "Every sub-ticket is closed:\n\n{list}", "states": {"done": "done", "cancelled": "cancelled"}},
     "fr": {"failed": "L'agent s'est arrêté avant la fin : {why}\n\nRépondez à ce commentaire pour qu'il réessaie.",
            "pr": "Pull request : {url}", "ticket": "Ticket {id}.",
            "refused": "Le travail est fait, mais les règles de l'agent interdisent d'ouvrir cette pull request : {why}.\n\n"
@@ -57,7 +65,10 @@ TEXT = {
            "manual": "À fusionner par une personne, pas automatiquement : {why}.",
            "breach": {"files": "fichiers qu'il ne peut pas modifier : {v}", "binary": "fichiers binaires : {v}",
                       "lines": "{v} lignes modifiées, {max} au plus", "count": "{v} fichiers modifiés, {max} au plus",
-                      "sql": "un changement destructif du schéma de la base : {v}"}},
+                      "sql": "un changement destructif du schéma de la base : {v}",
+                      "outside": "fichiers que le rôle {role} ne peut pas modifier : {v}"},
+           "nothing": "le chef de projet n'a créé aucun sous-ticket. Son compte rendu :\n\n{report}",
+           "closed": "Tous les sous-tickets sont clos :\n\n{list}", "states": {"done": "terminé", "cancelled": "annulé"}},
 }
 JOBS = queue.Queue()
 
@@ -108,6 +119,9 @@ def load():
         "lang": env("AGENT_LANG", "en") if env("AGENT_LANG", "en") in TEXT else "en",
         "sweep": int(env("AGENT_SWEEP_MIN", "60")) * 60,
         "rules": json.load(open(env("AGENT_RULES_FILE", os.path.join(DIR, "rules.json")), encoding="utf-8")),
+        "teams": teams(json.loads(env("AGENT_TEAMS", "{}")),
+                       json.load(open(env("AGENT_TEAM_FILE", os.path.join(DIR, "team.json")), encoding="utf-8"))),
+        "budgets": {},
     }
     missing = [k for k in ("hook_secret", "mcp_url", "mcp_key", "claude_env", "git_token", "repos") if not conf[k]]
     if missing:
@@ -117,7 +131,52 @@ def load():
     return conf
 
 
+def teams(given, known):
+    """The teams of AGENT_TEAMS, each role completed by team.json and its key read:
+    {project: {"lead": name, "roles": {name: settings}}}."""
+    out = {}
+    for project, team in given.items():
+        roles = {}
+        for name, own in team["roles"].items():
+            role = {**known["roles"].get(name, {}), **own}
+            # default: mcp-key-<role> next to the agent's own key
+            path = role.get("key_file") or os.path.join(os.path.dirname(env("PLAN_MCP_KEY_FILE", "/run/agent/x")), f"mcp-key-{name}")
+            role["key"] = open(path, encoding="utf-8").read().strip() if os.path.isfile(path) else ""
+            if not role["key"]:
+                raise SystemExit(f"team {project}: role {name} has no MCP key ({path})")
+            roles[name] = role
+        if team["lead"] not in roles:
+            raise SystemExit(f"team {project}: the lead {team['lead']} is not one of its roles")
+        out[project] = {"lead": team["lead"], "roles": roles}
+    return out
+
+
 # ---------- pure helpers (test_agent.py) ----------
+def role_for(ticket, team):
+    """The role that builds a ticket of a team: its "agent" field, else the lead."""
+    return ticket.get("agent") or team["lead"]
+
+
+def outside(paths, numstat):
+    """Files of a change (`git diff --numstat -z`) under none of the paths of a role."""
+    files = [rec.split("\t", 2)[2] for rec in numstat.split("\0") if rec]
+    return [f for f in files if not any(matches(f, p) for p in paths)]
+
+
+def waits_for(parent, tid):
+    """The sub-tickets of the same parent, of another role, still open: a role that
+    "waits" (the writer documents what the others built) starts after them."""
+    kids = parent.get("children") or []
+    me = next((k for k in kids if k["id"] == tid), {})
+    return [k["id"] for k in kids if k["id"] != tid and k.get("agent") != me.get("agent")
+            and k["state"] not in ("done", "cancelled")]
+
+
+def summary(parent, words):
+    """The closing report of a parent: its sub-tickets and how they ended."""
+    return words["closed"].format(list="\n".join(
+        f"- {k['id']} ({k.get('agent') or '-'}) : {k['title']}, {words['states'].get(k['state'], k['state'])}"
+        for k in parent.get("children") or []))
 def matches(path, pattern):
     """A pattern with a / against the whole path, one without against the file name."""
     return fnmatch.fnmatchcase(path if "/" in pattern else path.rsplit("/", 1)[-1], pattern)
@@ -221,12 +280,18 @@ def pr_head(repo_url, push_url, branch):
     return branch if owner == pusher else f"{pusher}:{branch}"
 
 
-def fill(template, ticket):
-    """The prompt: the ticket as JSON, request and data apart."""
+def fill(template, ticket, parent=None, role="", roles=None):
+    """The prompt: the ticket as JSON, request and data apart. A sub-ticket's
+    request holds the approved parent it is part of: its frame."""
     request = {"id": ticket["id"], "title": ticket["title"], "description": ticket["description"]}
+    if parent:
+        request["part_of"] = {"id": parent["id"], "title": parent["title"], "description": parent["description"]}
     data = {k: ticket.get(k) for k in ("approval", "comments", "links", "files", "priority", "milestone")}
+    if parent:
+        data["other_parts"] = [k for k in parent.get("children") or [] if k["id"] != ticket["id"]]
     dump = lambda v: json.dumps(v, ensure_ascii=False, indent=2)
-    return template.replace("{{REQUEST}}", dump(request)).replace("{{DATA}}", dump(data)).replace("{{ID}}", ticket["id"])
+    return (template.replace("{{REQUEST}}", dump(request)).replace("{{DATA}}", dump(data)).replace("{{ID}}", ticket["id"])
+            .replace("{{ROLE}}", role).replace("{{ROLES}}", dump(roles or {})))
 
 
 class Budget:
@@ -275,13 +340,14 @@ def http_json(url, token, body=None):
         return json.load(resp)
 
 
-def mcp(conf, tool, **args):
-    """One tool of Cairn Plan's MCP server; returns its answer, parsed.
+def mcp(conf, tool, key=None, **args):
+    """One tool of Cairn Plan's MCP server, under the account of `key` (default:
+    the agent's); returns its answer, parsed.
     ponytail: plain JSON answers only, which is what Cairn Plan sends; read
     the event stream too if this ever talks to another MCP server."""
     body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": args}}
     req = urllib.request.Request(conf["mcp_url"], data=json.dumps(body).encode(), headers={
-        "Authorization": f"Bearer {conf['mcp_key']}", "Content-Type": "application/json", "Accept": "application/json"})
+        "Authorization": f"Bearer {key or conf['mcp_key']}", "Content-Type": "application/json", "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         out = json.load(resp)
     result = out.get("result") or {}
@@ -352,8 +418,8 @@ def open_pr(conf, repo, base, branch, title, body):
     raise RuntimeError("pull request refused by the forge, and none is open for the branch")
 
 
-def claude(conf, job, prompt):
-    """Runs Claude Code in the clone. Returns (report, dollars)."""
+def claude(conf, job, prompt, role):
+    """Runs Claude Code in the clone, with the account, model and tools of the role. Returns (report, dollars)."""
     # In a folder the worker cannot write. Written aside then renamed: the
     # one of the last ticket belongs to the worker and cannot be opened again.
     mcp_file = os.path.join(conf["work"], "mcp.json")
@@ -361,16 +427,16 @@ def claude(conf, job, prompt):
         os.remove(mcp_file + ".tmp")
     with open(mcp_file + ".tmp", "w", encoding="utf-8") as f:
         json.dump({"mcpServers": {"plan": {"type": "http", "url": conf["mcp_url"],
-                                           "headers": {"Authorization": f"Bearer {conf['mcp_key']}"}}}}, f)
+                                           "headers": {"Authorization": f"Bearer {role.get('key') or conf['mcp_key']}"}}}}, f)
     pw = pwd.getpwnam(conf["worker"])
     os.chmod(mcp_file + ".tmp", 0o400)  # before it changes hands: after, only its owner may
     os.chown(mcp_file + ".tmp", pw.pw_uid, pw.pw_gid)
     os.replace(mcp_file + ".tmp", mcp_file)
     cmd = ["claude", "-p", prompt, "--output-format", "json", "--max-turns", conf["max_turns"],
-           "--mcp-config", mcp_file, "--strict-mcp-config", "--allowedTools", ",".join(TOOLS),
-           "--disallowedTools", "WebFetch,WebSearch,Agent,NotebookEdit"]
-    if conf["model"]:
-        cmd += ["--model", conf["model"]]
+           "--mcp-config", mcp_file, "--strict-mcp-config", "--allowedTools", ",".join(role.get("allowed") or TOOLS),
+           "--disallowedTools", ",".join(["WebFetch", "WebSearch", "Agent", "NotebookEdit", *role.get("denied", [])])]
+    if role.get("model") or conf["model"]:
+        cmd += ["--model", role.get("model") or conf["model"]]
     try:
         p = as_worker(conf, cmd, cwd=job, timeout=conf["timeout"],
                       extra={**conf["claude_env"], "DISABLE_AUTOUPDATER": "1", "DISABLE_TELEMETRY": "1"})
@@ -407,22 +473,65 @@ def question(ticket):
     return bool(events) and events[-1].get("field") == "created" and events[-1].get("new") == "waiting"
 
 
-def work(conf, budget, call, template):
+def budget_of(conf, name, usd):
+    """The day's budget of a role (the one agent without a team: "agent", state.json)."""
+    if name not in conf["budgets"]:
+        file = "state.json" if name == "agent" else f"state-{name}.json"
+        conf["budgets"][name] = Budget(os.path.join(conf["work"], file), conf["daily_tickets"], usd)
+    return conf["budgets"][name]
+
+
+def close_parent(conf, team, parent_id, words):
+    """After a sub-ticket: queue the parts still to do (a role that waited may go now),
+    and close the parent, under the lead's account, once every part is closed."""
+    lead = team["roles"][team["lead"]]["key"]
+    parent = mcp(conf, "get_ticket", key=lead, id=parent_id)
+    if parent["state"] != "in_progress":
+        return
+    left = [k for k in parent.get("children") or [] if k["state"] not in ("done", "cancelled")]
+    for k in left:
+        if k["state"] == "todo":
+            JOBS.put({"event": "ticket.approved", "ticket": k["id"]})
+    if not left:
+        mcp(conf, "finish_ticket", key=lead, id=parent_id, report=summary(parent, words))
+        log(f"[{team['lead']}] {parent_id}: every sub-ticket is closed, done")
+
+
+def work(conf, call, templates):
     tid = call["ticket"]
     project = tid.rsplit("-", 1)[0]  # from the id, not from what else the call says
     repo = conf["repos"].get(project)
     if not repo:
         return log(f"{tid}: no repository is set for project {project}, left alone")
+    team = conf["teams"].get(project)
+    try:
+        # read under the lead's account in a team (its accounts are the members), else the agent's
+        first = mcp(conf, "get_ticket", key=team and team["roles"][team["lead"]]["key"], id=tid)
+    except Refused as e:
+        return log(f"{tid}: not read: {e}")
+    if question(first):
+        return log(f"{tid}: a question to the owner, left to the routine")
+    # the role is read in the ticket, never in the call
+    name = role_for(first, team) if team else "agent"
+    role = team["roles"].get(name) if team else {}
+    if role is None:
+        return log(f"{tid}: role {name} is not in the team of {project}, left alone")
+    say = lambda m: log(f"[{name}] {tid}: {m}")
+    key = role.get("key")
+    budget = budget_of(conf, name, float(role.get("usd", conf["daily_usd"])))
     why = budget.refusal()
     if why:
-        return log(f"{tid}: left alone, {why}")
+        return say(f"left alone, {why}")
     try:
-        if question(mcp(conf, "get_ticket", id=tid)):
-            return log(f"{tid}: a question to the owner, left to the routine")
-        ticket = mcp(conf, "take_ticket", id=tid)
+        parent = mcp(conf, "get_ticket", key=key, id=first["parent"]) if first.get("parent") else None
+        if role.get("waits") and parent and waits_for(parent, tid):
+            return say(f"waits for {', '.join(waits_for(parent, tid))}")
+        ticket = mcp(conf, "take_ticket", key=key, id=tid)
     except Refused as e:
-        return log(f"{tid}: not taken: {e}")
-    log(f"{tid}: taken ({call['event']})")
+        return say(f"not taken: {e}")
+    say(f"taken ({call['event']})")
+    template = templates[role.get("prompt", "prompt.md")]
+    others = {n: r.get("text", "") for n, r in (team or {}).get("roles", {}).items() if n != name}
     started, text = time.time(), TEXT[conf["lang"]]
     w = os.path.join(conf["work"], "w")
     src, job, bundle, branch = os.path.join(conf["work"], "src"), os.path.join(w, "job"), os.path.join(w, "out.bundle"), f"agent/{tid}"
@@ -435,10 +544,14 @@ def work(conf, budget, call, template):
         base = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=src)
         # a ticket taken again goes on from its branch
         resumed = git(["fetch", "-q", push, f"{branch}:{branch}"], cwd=src, auth=auth, check=False)
+        # the branches of the other parts, to read (origin/agent/<id> in the clone)
+        for k in (parent or {}).get("children") or []:
+            if k["id"] != tid:
+                git(["fetch", "-q", push, f"agent/{k['id']}:agent/{k['id']}"], cwd=src, auth=auth, check=False)
         wgit(conf, w, "clone", "-q", "--no-hardlinks", src, job)
         wgit(conf, job, "checkout", "-q", "-b", branch, f"origin/{branch if resumed else base}")
         try:
-            report, usd = claude(conf, job, fill(template, ticket))
+            report, usd = claude(conf, job, fill(template, ticket, parent, ("Your role in the team: " + role["text"]) if role.get("text") else "", others), role)
         except RuntimeError as e:
             budget.add(usd=getattr(e, "usd", 0.0))
             if re.search(r"(?i)usage limit|rate limit|quota|credit balance", str(e)):
@@ -458,13 +571,18 @@ def work(conf, budget, call, template):
             take_bundle(bundle, mine)
             git(["-c", "transfer.fsckObjects=true", "fetch", "-q", mine, f"{branch}:{branch}"], cwd=src)
             git(["push", "-q", push, f"{branch}:{branch}"], cwd=src, auth=auth)
-        now = mcp(conf, "get_ticket", id=tid)
+        now = mcp(conf, "get_ticket", key=key, id=tid)
         if now["state"] != "in_progress" or asked(now, int(started)):  # Claude asked a question
-            return log(f"{tid}: now {now['state']}, question asked, {new} commit(s) pushed, {usd:.2f} $")
+            return say(f"now {now['state']}, question asked, {new} commit(s) pushed, {usd:.2f} $")
         report = report.encode()[:9000].decode(errors="ignore")  # a comment holds 10 000 bytes
         if ahead:
             span = f"origin/{base}...{branch}"
-            found = breaches(conf["rules"], git(["diff", "--numstat", "-z", "--no-renames", span], cwd=src),
+            numstat = git(["diff", "--numstat", "-z", "--no-renames", span], cwd=src)
+            # the paths of the role: checked here, out of Claude's reach (the forge grants a whole repository)
+            off = outside(role["paths"], numstat) if "paths" in role else []
+            if off:
+                raise Breach(text["breach"]["outside"].format(role=name, v=", ".join(off[:20])))
+            found = breaches(conf["rules"], numstat,
                              git(["diff", "-U0", "--no-renames", "--no-color", "--no-ext-diff", span], cwd=src))
             stop = blocking(found, conf["rules"])
             if stop:
@@ -473,18 +591,31 @@ def work(conf, budget, call, template):
                 report = text["manual"].format(why=say_breaches(found, conf["rules"], text["breach"])) + "\n\n" + report
             body = f"{text['ticket'].format(id=tid)}\n\n{report}"
             url = open_pr(conf, repo, base, branch, f"{tid}: {ticket['title']}", body)
-            mcp(conf, "add_link", id=tid, url=url, title=f"PR: {ticket['title']}"[:200])
+            mcp(conf, "add_link", key=key, id=tid, url=url, title=f"PR: {ticket['title']}"[:200])
             report += "\n\n" + text["pr"].format(url=url)
-        mcp(conf, "finish_ticket", id=tid, report=report, minutes=max(1, round((time.time() - started) / 60)))
-        log(f"{tid}: done, {ahead} commit(s), {usd:.2f} $")
+        cost = f"\n\n{name} · {role.get('model') or conf['model'] or '-'} · {usd:.2f} $" if team else ""
+        if role.get("splits"):
+            # the lead splits and builds nothing: the parent stays in progress until its parts are closed
+            parts = now.get("children") or []
+            if not parts:
+                raise RuntimeError(text["nothing"].format(report=report[:4000]))
+            mcp(conf, "comment_ticket", key=key, id=tid, body=report + cost)
+            return say(f"split into {', '.join(k['id'] for k in parts)}, {usd:.2f} $")
+        mcp(conf, "finish_ticket", key=key, id=tid, report=report + cost, minutes=max(1, round((time.time() - started) / 60)))
+        say(f"done, {ahead} commit(s), {usd:.2f} $")
+        if team and parent:
+            try:
+                close_parent(conf, team, parent["id"], text)
+            except Exception as e:
+                say(f"parent {parent['id']} not updated: {e!r}")
     except Exception as e:  # whatever went wrong, the ticket must not stay "in progress" with nobody on it
-        log(f"{tid}: failed: {e!r}")
+        say(f"failed: {e!r}")
         why = str(e)[:1500]
         try:
-            mcp(conf, "wait_ticket", id=tid, question=text["refused"].format(why=why, branch=branch)
+            mcp(conf, "wait_ticket", key=key, id=tid, question=text["refused"].format(why=why, branch=branch)
                 if isinstance(e, Breach) else text["failed"].format(why=why))
         except Exception as e2:
-            log(f"{tid}: could not even say so in the ticket: {e2!r}")
+            say(f"could not even say so in the ticket: {e2!r}")
     finally:
         clean(conf)
 
@@ -502,7 +633,9 @@ def sweep(conf):
             for t in mcp(conf, "list_tickets", project=project, state="waiting")["tickets"]:
                 full = mcp(conf, "get_ticket", id=t["id"])
                 last = (full.get("comments") or [{}])[-1].get("author")
-                if last and last == (full.get("approval") or {}).get("by"):
+                # a sub-ticket was approved by the lead, on the approval of its parent: either answers
+                ap = full.get("approval") or {}
+                if last and last in (ap.get("by"), ((ap.get("parent") or {}).get("approval") or {}).get("by")):
                     JOBS.put({"event": "ticket.answered", "ticket": t["id"]})
         except Exception as e:  # Cairn Plan not up yet, a project the account is not a member of
             log(f"sweep {project}: {e!r}")
@@ -541,10 +674,13 @@ def main():
     if not os.path.isdir(w):  # the one folder of the worker; created before it ever runs
         os.makedirs(w)
         os.chown(w, pw.pw_uid, pw.pw_gid)
-    budget = Budget(os.path.join(conf["work"], "state.json"), conf["daily_tickets"], conf["daily_usd"])
-    template = open(os.path.join(DIR, "prompt.md"), encoding="utf-8").read()
+    names = {"prompt.md"} | {r.get("prompt", "prompt.md") for t in conf["teams"].values() for r in t["roles"].values()}
+    templates = {n: open(os.path.join(DIR, n), encoding="utf-8").read() for n in names}
     threading.Thread(target=serve, args=(conf,), daemon=True).start()
-    log(f"cairn-plan-agent listening on {conf['listen']}, projects: {', '.join(sorted(conf['repos']))}")
+    crews = ["team %s: %s" % (p, ", ".join("%s (%s)" % (n, r.get("model", "-")) for n, r in t["roles"].items()))
+             for p, t in sorted(conf["teams"].items())]
+    log(f"cairn-plan-agent listening on {conf['listen']}, projects: {', '.join(sorted(conf['repos']))}"
+        + "".join("; " + c for c in crews))
     sweep(conf)
     while True:  # one ticket at a time
         try:
@@ -553,7 +689,7 @@ def main():
             sweep(conf)
             continue
         try:
-            work(conf, budget, call, template)
+            work(conf, call, templates)
         except Exception as e:
             log(f"{call.get('ticket')}: {e!r}")
 

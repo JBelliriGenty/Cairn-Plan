@@ -104,7 +104,7 @@ const STATE = { backlog: "Proposed", todo: "To do", in_progress: "In progress", 
 const STATE_CLASS = { backlog: "unk", todo: "todo", in_progress: "warn", waiting: "wait", done: "ok", cancelled: "off" };
 const PRIORITY = { none: "No priority", low: "Low", medium: "Medium", high: "High", urgent: "Urgent" };
 const ROLE = { reader: "Reader", contributor: "Contributor", owner: "Owner", admin: "Administrator" };
-const FIELD = { title: "Title", state: "State", priority: "Priority", assignee: "Assignee", start_date: "Start", end_date: "End", milestone: "Milestone" };
+const FIELD = { title: "Title", state: "State", priority: "Priority", assignee: "Assignee", start_date: "Start", end_date: "End", milestone: "Milestone", agent: "Agent" };
 
 let ME = { states: [], priorities: [] };
 let FILTER = "open";
@@ -223,6 +223,17 @@ try { VIEW = localStorage.getItem("cairn-plan-view") === "board" ? "board" : "li
 const FILTERS = { q: "", assignee: "*", priority: "*", milestone: "*" };
 const BOARD = ["backlog", "todo", "in_progress", "waiting", "done"];   // "cancelled" joins when it has tickets
 
+/** Progress of a parent: its sub-tickets done out of those not cancelled; nothing for a ticket without any. */
+function progress(k) {
+  const { done = 0, total = 0 } = k.progress || {};
+  if (!total) return null;
+  const pct = Math.round(100 * done / total);
+  return el("span", { class: "progress", title: t("{done} of {total} sub-tickets done", { done, total }) },
+    el("span", { class: "bar", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": String(total), "aria-valuenow": String(done),
+      "aria-label": t("Sub-tickets done") }, el("span", { style: "width:" + pct + "%" })),
+    el("span", { class: "label" }, done + "/" + total));
+}
+
 async function project(key) {
   const p = live("api/projects/" + encodeURIComponent(key), await api("api/projects/" + encodeURIComponent(key)));
   setSpace(p.space);
@@ -234,13 +245,14 @@ async function project(key) {
   const title = el("input", { required: true, maxLength: 200, placeholder: t("Title of the ticket"), "aria-label": t("Title of the ticket") });
   const cell = (label, ...kids) => el("td", { "data-label": t(label) }, kids);
   const prio = k => k.priority !== "none" && el("span", { class: "pill prio-" + k.priority }, t(PRIORITY[k.priority]));
+  const agent = k => k.agent && el("span", { class: "pill agent" }, k.agent);
   const tickets = el("div", {}), count = el("span", { class: "label" });
 
   const table = shown => el("div", { class: "card table-wrap" }, shown.length ? el("table", {},
     el("thead", {}, el("tr", {}, ["Ticket", "Title", "State", ...(stones.length ? ["Milestone"] : []), "Priority", "Assignee", "Start", "End"].map(h => el("th", {}, t(h))))),
     el("tbody", {}, shown.map(k => el("tr", {},
       cell("Ticket", el("a", { href: "#/t/" + k.id }, k.id)),
-      cell("Title", el("a", { href: "#/t/" + k.id }, k.title)),
+      cell("Title", el("a", { href: "#/t/" + k.id }, k.title), k.parent && el("span", { class: "label" }, " · " + k.parent), " ", agent(k), progress(k)),
       cell("State", pill(k.state)),
       stones.length > 0 && cell("Milestone", k.milestone),
       cell("Priority", prio(k)),
@@ -267,7 +279,8 @@ async function project(key) {
           ondragstart: ev => { ev.dataTransfer.setData("text/plain", k.id); ev.dataTransfer.effectAllowed = "move"; } },
           el("span", { class: "label" }, k.id),
           el("strong", {}, k.title),
-          el("span", { class: "kmeta" }, prio(k), k.assignee && el("span", { class: "label" }, k.assignee),
+          progress(k),
+          el("span", { class: "kmeta" }, prio(k), agent(k), k.assignee && el("span", { class: "label" }, k.assignee),
             k.end_date && el("span", { class: "label" }, day(k.end_date))))));
     }));
 
@@ -432,6 +445,8 @@ async function ticket(id) {
     start_date: el("input", { type: "date", value: tk.start_date, disabled: !canEdit }),
     end_date: el("input", { type: "date", value: tk.end_date, disabled: !canEdit }),
     milestone: el("input", { value: tk.milestone, maxLength: 80, disabled: !canEdit }),
+    // which agent builds it: part of what is approved, frozen like the text
+    agent: el("input", { value: tk.agent, maxLength: 20, pattern: "[a-z0-9._\\-]*", autocapitalize: "none", disabled: frozen }),
   };
   f.milestone.setAttribute("list", "milestones");   // "list" is read-only as a property
   const save = async extra => {
@@ -459,8 +474,9 @@ async function ticket(id) {
   });
   show(
     el("div", { class: "top" },
-      el("div", {}, el("h1", {}, id + " ", pill(tk.state)),
-        el("p", { class: "meta" }, t("Created by {author} on {date}", { author: tk.author, date: stamp(tk.created) }))),
+      el("div", {}, el("h1", {}, id + " ", pill(tk.state), " ", progress(tk)),
+        el("p", { class: "meta" }, t("Created by {author} on {date}", { author: tk.author, date: stamp(tk.created) }),
+          tk.parent && [" · ", t("Sub-ticket of"), " ", el("a", { href: "#/t/" + tk.parent }, tk.parent)])),
       el("a", { class: "button", href: "#/p/" + key }, p.name)),
     asked && el("div", { class: "card question" },
       el("h2", {}, t("{author} asks you", { author: tk.author })),
@@ -483,11 +499,17 @@ async function ticket(id) {
       el("div", { class: "fields" },
         field("State", f.state), field("Priority", f.priority), field("Assignee", f.assignee),
         field("Start", f.start_date), field("End", f.end_date),
-        field("Milestone", f.milestone, "A family of tickets: a phase, a version.")),
+        field("Milestone", f.milestone, "A family of tickets: a phase, a version."),
+        field("Agent", f.agent, "The agent role that builds it (dev, doc); empty: the project lead.")),
       el("datalist", { id: "milestones" }, [...new Set(p.tickets.map(k => k.milestone).filter(Boolean))].sort().map(s => el("option", { value: s }))),
       canEdit && el("div", { class: "row" },
         el("button", { class: "primary" }, t("Save")),
         owner && tk.state === "backlog" && el("button", { type: "button", class: "approve", onclick: act(() => save({ state: "todo" })) }, t("Approve")))),
+    tk.children.length > 0 && el("h2", {}, t("Sub-tickets"), " ", progress(tk)),
+    tk.children.length > 0 && el("div", { class: "card" }, el("ul", { class: "list" }, tk.children.map(k => el("li", {},
+      el("a", { href: "#/t/" + k.id }, el("strong", {}, k.id + " · " + k.title)),
+      el("span", { class: "kmeta" }, k.agent && el("span", { class: "pill agent" }, k.agent),
+        k.assignee && el("span", { class: "label" }, k.assignee), pill(k.state)))))),
     el("h2", {}, t("Links")),
     el("div", { class: "card" },
       tk.links.length ? el("ul", { class: "list" }, tk.links.map(l => el("li", {},
