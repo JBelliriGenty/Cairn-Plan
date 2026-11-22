@@ -29,21 +29,69 @@ function linked(text) {
   return out;
 }
 
+// Mermaid is a large file (about 3 MB): fetched once, by the first page that shows a
+// ```mermaid block. Same origin, pinned version (the name of the file says which).
+let mermaidReady = null;
+function loadMermaid() {
+  mermaidReady ??= new Promise((resolve, reject) => {
+    document.head.append(el("script", { src: "mermaid-11.12.0.min.js", onload: resolve,
+      onerror: () => { mermaidReady = null; reject(new Error("mermaid.js not loaded")); } }));
+  });
+  return mermaidReady;
+}
+
+let diagrams = 0;
+const darkScheme = matchMedia("(prefers-color-scheme: dark)");
+
+// Draws the source into box as SVG. "strict": no HTML and no click in a diagram
+// (the text comes from members). Any failure leaves the source as text, plus a short message.
+async function drawDiagram(box, source) {
+  const pre = el("pre", {}, source), id = "diagram-" + (++diagrams);
+  try {
+    await loadMermaid();
+    mermaid.initialize({ startOnLoad: false, securityLevel: "strict", suppressErrorRendering: true, theme: darkScheme.matches ? "dark" : "default" });
+    const { svg } = await mermaid.render(id, source);
+    const view = el("div", { class: "diagram" });
+    view.innerHTML = svg;   // SVG built and sanitised by Mermaid itself (strict), never typed text
+    box.replaceChildren(view);
+    box.classList.remove("failed");
+  } catch (e) {
+    // What this failed render can leave. Only its own: the other diagrams of the page
+    // may be drawing at the same moment, in their own temporary element.
+    document.getElementById("d" + id)?.remove();
+    box.replaceChildren(el("p", { class: "meta" }, t("This diagram could not be drawn. Source shown instead.")), pre);
+    box.classList.add("failed");
+  }
+}
+
+// The diagrams on screen follow the light or dark scheme of the system.
+darkScheme.addEventListener("change", () => {
+  document.querySelectorAll(".mermaid").forEach(box => drawDiagram(box, box.dataset.source));
+});
+
 // A description or a comment: fenced blocks (```) are shown as they are, each
 // with a button that copies it (a command to paste); the rest is linked() text.
+// A ```mermaid block is drawn as a diagram; its button copies the source.
 function rich(text) {
   const out = [];
   const plain = s => { s = s.replace(/^\n+|\n+$/g, ""); if (s) out.push(el("p", { class: "body" }, linked(s))); };
   let last = 0;
-  for (const m of text.matchAll(/```[^\n]*\n([\s\S]*?)\n?```/g)) {
+  for (const m of text.matchAll(/```([^\n]*)\n([\s\S]*?)\n?```/g)) {
     plain(text.slice(last, m.index));
-    const code = m[1], pre = el("pre", {}, code);
-    out.push(el("div", { class: "code" }, pre, el("button", { type: "button", onclick: act(async () => {
+    const code = m[2];
+    const draw = m[1].trim().toLowerCase() === "mermaid";
+    const shown = draw ? el("div", { class: "mermaid" }) : el("pre", {}, code);
+    if (draw) {
+      shown.dataset.source = code;
+      shown.append(el("pre", {}, code));   // shown until the drawing is ready
+      drawDiagram(shown, code);
+    }
+    out.push(el("div", { class: "code" }, shown, el("button", { type: "button", onclick: act(async () => {
       try {
         await navigator.clipboard.writeText(code);
         toast(t("Copied"));
       } catch (e) {   // clipboard refused (permission, embedded view): selected, for Ctrl+C
-        getSelection().selectAllChildren(pre);
+        getSelection().selectAllChildren(shown);
         toast(t("Selected: copy it with Ctrl+C."));
       }
     }) }, t("Copy"))));

@@ -23,6 +23,7 @@ password of its own.
 A ticket has a title, a description, a state (Proposed, To do, In progress,
 Waiting, Done, Cancelled), a priority, an assignee, a start and an end date, links,
 files, comments, the time worked on it and a history. The page is in English and French.
+A ```mermaid block in a description or a comment is drawn as a diagram (Mermaid is served by Cairn Plan itself, no CDN).
 
 ## Screenshots
 

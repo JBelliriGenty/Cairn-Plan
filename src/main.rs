@@ -21,6 +21,11 @@ const JS: &str = include_str!("../www/plan.js");
 const CSS: &str = include_str!("../www/plan.css");
 const I18N: &str = include_str!("../www/i18n.js");
 const ICON: &str = include_str!("../www/icon.svg");
+// Mermaid, pinned (11.12.0, MIT): served from here, never from a CDN, and only
+// fetched by a page that shows a ```mermaid block. The version is in the name,
+// so the file can be cached for good.
+const MERMAID: &str = include_str!("../www/mermaid-11.12.0.min.js");
+const MERMAID_PATH: &str = "mermaid-11.12.0.min.js";
 
 /// Every key read from the configuration file (checked against the docs by a test).
 const KEYS: [&str; 22] = [
@@ -559,16 +564,30 @@ fn test_send(cfg: &Config, r: Request, who: &Actor, email: &str, body: &Value) {
     }
 }
 
+// The page alone gets `style-src 'unsafe-inline'`: Mermaid puts a <style> element and
+// style attributes in each SVG it draws. `script-src` stays closed (`default-src 'self'`).
+fn csp(ctype: &str) -> &'static str {
+    if ctype == "text/html" {
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'"
+    } else {
+        "default-src 'self'; frame-ancestors 'none'"
+    }
+}
+
 fn respond(r: Request, code: u16, body: String, ctype: &str) {
+    respond_cached(r, code, body, ctype, "no-store");
+}
+
+fn respond_cached(r: Request, code: u16, body: String, ctype: &str, cache: &str) {
     let h = |k: &str, v: &str| Header::from_bytes(k, v).unwrap();
     let _ = r.respond(
         Response::from_string(body)
             .with_status_code(code)
             .with_header(h("Content-Type", &format!("{ctype}; charset=utf-8")))
-            .with_header(h("Cache-Control", "no-store"))
+            .with_header(h("Cache-Control", cache))
             .with_header(h("X-Content-Type-Options", "nosniff"))
             .with_header(h("Referrer-Policy", "no-referrer"))
-            .with_header(h("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'")),
+            .with_header(h("Content-Security-Policy", csp(ctype))),
     );
 }
 
@@ -618,6 +637,9 @@ fn handle(cfg: &'static Config, mut r: Request) {
         (Method::Get, ["plan.css"]) => return page(r, CSS, "text/css"),
         (Method::Get, ["i18n.js"]) => return page(r, I18N, "text/javascript"),
         (Method::Get, ["icon.svg"]) => return page(r, ICON, "image/svg+xml"),
+        (Method::Get, [f]) if *f == MERMAID_PATH => {
+            return respond_cached(r, 200, MERMAID.into(), "text/javascript", "private, max-age=31536000, immutable")
+        }
         _ => {}
     }
     if let (Method::Post, ["api", "settings", "test"]) = (&method, segs.as_slice()) {
@@ -739,6 +761,21 @@ mod tests {
         assert_eq!(super::kind("a.PNG"), ("image/png", "inline"));
         assert_eq!(super::kind("page.html"), ("application/octet-stream", "attachment"));
         assert_eq!(super::kind("drawing.svg"), ("application/octet-stream", "attachment"));
+    }
+
+    #[test]
+    fn only_the_page_opens_style_src() {
+        assert!(super::csp("text/html").contains("style-src 'self' 'unsafe-inline'"));
+        assert!(!super::csp("text/html").contains("script-src"));
+        assert_eq!(super::csp("text/javascript"), "default-src 'self'; frame-ancestors 'none'");
+        assert_eq!(super::csp("application/json"), "default-src 'self'; frame-ancestors 'none'");
+    }
+
+    #[test]
+    fn mermaid_is_embedded_and_loaded_by_name() {
+        assert!(super::MERMAID.contains("globalThis[\"mermaid\"]"));
+        assert!(super::MERMAID_PATH.contains("11.12.0"));
+        assert!(include_str!("../www/plan.js").contains(super::MERMAID_PATH));
     }
 
     fn oidc_config() -> super::Config {

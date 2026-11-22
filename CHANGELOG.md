@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.17.1
+
+- A diagram that fails to draw no longer makes the other diagrams of the
+  same page fail: it removes only its own temporary element, not those of
+  the diagrams drawing at the same moment.
+
+## 0.17.0
+
+- A ```mermaid block in a description or a comment is drawn as a diagram
+  (SVG), light or dark with the system. The "Copy" button copies the
+  source. Any other block is unchanged.
+- Mermaid 11.12.0 is part of the binary (`www/mermaid-11.12.0.min.js`, MIT),
+  with no CDN. The browser fetches it only when a page shows a diagram.
+- Mermaid runs with `securityLevel: "strict"`: no HTML and no click in a
+  diagram.
+- Content-Security-Policy: the page (and only the page) adds
+  `style-src 'self' 'unsafe-inline'`, because Mermaid writes a `<style>`
+  element in each SVG. `script-src` stays closed.
+- A syntax error shows the source as text with a short message.
+
 ## 0.16.5
 
 - Agent: the lead no longer gives a sub-ticket a part outside the

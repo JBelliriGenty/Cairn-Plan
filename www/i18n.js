@@ -156,7 +156,7 @@ const DICT = {
     "Done: nothing more to do. Carry on: you approve what the ticket says comes next, with your answer.":
       "Fait : plus rien à faire. Continuer : vous validez la suite annoncée dans le ticket, avec votre réponse.",
     "Done: nothing more to do.": "Fait : plus rien à faire.",
-    "Copy": "Copier", "Copied": "Copié", "Selected: copy it with Ctrl+C.": "Sélectionné : copiez avec Ctrl+C.",
+    "Copy": "Copier", "This diagram could not be drawn. Source shown instead.": "Ce schéma n'a pas pu être dessiné. Source affichée à la place.", "Copied": "Copié", "Selected: copy it with Ctrl+C.": "Sélectionné : copiez avec Ctrl+C.",
   },
 };
 
