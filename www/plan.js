@@ -172,6 +172,15 @@ const clock = sec => sec < 86400 ? span(Math.max(1, Math.round(sec / 60)))
   : t("{d} d {h} h", { d: Math.floor(sec / 86400), h: Math.floor(sec % 86400 / 3600) });
 const stamp = sec => new Date(sec * 1000).toLocaleString(LOCALE(), { dateStyle: "medium", timeStyle: "short" });
 const pill = state => el("span", { class: "pill " + STATE_CLASS[state] }, t(STATE[state] || state));
+// Who someone is at a glance: initials on a disc, one colour per person; a square for an agent.
+function avatar(login) {
+  const parts = login.split(/[-._ ]+/).filter(Boolean);
+  const text = ((parts[0] || "?")[0] + (parts[1] ? parts[1][0] : (parts[0] || "")[1] || "")).toUpperCase();
+  let h = 0;
+  for (const ch of login) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return el("span", { class: "avatar a" + (h % 7 + 1) + ((ME.agents || []).includes(login) ? " bot" : ""), "aria-hidden": "true" }, text);
+}
+const person = login => el("span", { class: "person" }, avatar(login), login);
 const field = (label, control, hint) => el("label", { class: "field" }, el("span", {}, t(label)), control, hint && el("small", {}, t(hint)));
 
 function select(values, current, label, props) {
@@ -227,7 +236,10 @@ async function nav() {
     } },
       el("summary", {}, el("a", { href: "#/", ...(location.hash.length < 3 ? { "aria-current": "page" } : {}) }, t("Projects"))),
       el("div", { class: "subnav" }, ps.filter(p => p.space === SPACE).map(p =>
-        el("a", { href: "#/p/" + p.key, ...(p.key === hereKey ? { "aria-current": "page" } : {}) }, p.name)))),
+        el("a", { href: "#/p/" + p.key, ...(p.key === hereKey && !location.hash.endsWith("/time") ? { "aria-current": "page" } : {}) }, p.name)))),
+    // the time of the space, then of each project from its page
+    ps.length > 0 && el("a", { class: "time-link", href: "#/e/" + encodeURIComponent(SPACE),
+      ...(location.hash.startsWith("#/e/") || location.hash.endsWith("/time") ? { "aria-current": "page" } : {}) }, t("Time")),
   ].filter(Boolean));
   return ps;
 }
@@ -304,7 +316,7 @@ async function project(key) {
       cell("State", pill(k.state)),
       stones.length > 0 && cell("Milestone", k.milestone),
       cell("Priority", prio(k)),
-      cell("Assignee", k.assignee),
+      cell("Assignee", k.assignee && person(k.assignee)),
       cell("Start", day(k.start_date)),
       cell("End", day(k.end_date))))))
     : el("p", { class: "empty" }, t("No ticket here.")));
@@ -328,7 +340,7 @@ async function project(key) {
           el("span", { class: "label" }, k.id),
           el("strong", {}, k.title),
           progress(k),
-          el("span", { class: "kmeta" }, prio(k), agent(k), k.assignee && el("span", { class: "label" }, k.assignee),
+          el("span", { class: "kmeta" }, prio(k), agent(k), k.assignee && el("span", { class: "label" }, person(k.assignee)),
             k.end_date && el("span", { class: "label" }, day(k.end_date))))));
     }));
 
@@ -359,7 +371,9 @@ async function project(key) {
   show(
     el("div", { class: "top" },
       el("div", {}, el("h1", {}, p.name), el("p", { class: "meta" }, [p.space, p.key, t(ROLE[p.role]), p.description].filter(Boolean).join(" · "))),
-      el("a", { class: "button", href: "#/p/" + p.key + "/members" }, tp(p.members.length, "{n} member", "{n} members"))),
+      el("div", { class: "row" },
+        el("a", { class: "button", href: "#/p/" + p.key + "/time" }, t("Time")),
+        el("a", { class: "button", href: "#/p/" + p.key + "/members" }, tp(p.members.length, "{n} member", "{n} members")))),
     el("div", { class: "row toolbar" },
       el("span", { class: "toggle" }, viewButton("list", "List"), viewButton("board", "Board")),
       el("input", { type: "search", value: FILTERS.q, placeholder: t("Search a ticket"), "aria-label": t("Search a ticket"),
@@ -406,7 +420,7 @@ async function members(key) {
     el("div", { class: "card table-wrap" }, el("table", {},
       el("thead", {}, el("tr", {}, ["Login", "Name", "Role", ""].map(h => el("th", {}, h && t(h))))),
       el("tbody", {}, p.members.map(m => el("tr", {},
-        el("td", { "data-label": t("Login") }, m.login),
+        el("td", { "data-label": t("Login") }, person(m.login)),
         el("td", { "data-label": t("Name") }, m.name),
         el("td", { "data-label": t("Role") }, owner
           ? select(["reader", "contributor", "owner"], m.role, v => t(ROLE[v]), { onchange: ev => set(m.login, ev.target.value)() })
@@ -557,7 +571,7 @@ async function ticket(id) {
     tk.children.length > 0 && el("div", { class: "card" }, el("ul", { class: "list" }, tk.children.map(k => el("li", {},
       el("a", { href: "#/t/" + k.id }, el("strong", {}, k.id + " · " + k.title)),
       el("span", { class: "kmeta" }, k.agent && el("span", { class: "pill agent" }, k.agent),
-        k.assignee && el("span", { class: "label" }, k.assignee), pill(k.state)))))),
+        k.assignee && el("span", { class: "label" }, person(k.assignee)), pill(k.state)))))),
     el("h2", {}, t("Links")),
     el("div", { class: "card" },
       tk.links.length ? el("ul", { class: "list" }, tk.links.map(l => el("li", {},
@@ -600,13 +614,13 @@ async function ticket(id) {
     el("h2", {}, t("Comments")),
     el("div", { class: "card" },
       tk.comments.length ? tk.comments.map(c => el("div", { class: "comment" },
-        el("p", { class: "meta" }, c.author + " · " + stamp(c.at)), rich(c.body)))
+        el("p", { class: "meta" }, person(c.author), " · " + stamp(c.at)), rich(c.body)))
         : el("p", { class: "empty" }, t("No comment yet.")),
       el("form", { class: "form", onsubmit: act(async () => { await api(path + "/comments", { body: words.value }); await ticket(id); }) },
         words, el("div", { class: "row" }, el("button", {}, t("Send"))))),
     el("h2", {}, t("History")),
     el("div", { class: "card" }, el("ul", { class: "list history" }, tk.events.map(e => el("li", {},
-      el("span", {}, e.actor + " " + describe(e)), el("span", { class: "label" }, stamp(e.at)))))),
+      el("span", {}, person(e.actor), " " + describe(e)), el("span", { class: "label" }, stamp(e.at)))))),
   );
 }
 
@@ -767,6 +781,208 @@ async function settings() {
   );
 }
 
+/* ---------- time ---------- */
+
+// The time of a project (#/p/KEY/time) or of a space (#/e/<space>): one
+// sentence (hours logged, what people and agents cost, tickets done), then
+// one view. The server sends the tickets and the entries; the page adds up.
+const TIME = { view: "summary", period: "30" };
+try { Object.assign(TIME, JSON.parse(localStorage.getItem("cairn-plan-time2") || "{}")); } catch (e) { /* storage blocked */ }
+const saveTime = () => { try { localStorage.setItem("cairn-plan-time2", JSON.stringify(TIME)); } catch (e) { /* storage blocked */ } };
+const PERIODS = { "7": "7 days", "30": "30 days", "90": "90 days", all: "All" };
+const VIEWS = { summary: "Summary", sheet: "Timesheet", journal: "Journal" };
+const DAY = 86400;
+const SHOWN = {};   // lists the reader asked to see in full
+
+function svg(tag, attrs, ...kids) {
+  const e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+  for (const k of kids.flat(Infinity)) if (k != null && k !== false) e.append(k);
+  return e;
+}
+const sum = (xs, f) => xs.reduce((a, x) => a + f(x), 0);
+const hours = min => min ? span(min) : "–";
+const startOf = { day: sec => { const d = new Date(sec * 1000); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; },
+  week: sec => { const d = new Date(sec * 1000); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - (d.getDay() + 6) % 7); return d.getTime() / 1000; },
+  month: sec => { const d = new Date(sec * 1000); return new Date(d.getFullYear(), d.getMonth(), 1).getTime() / 1000; } };
+const nextOf = { day: s => startOf.day(s + 30 * 3600), week: s => startOf.week(s + 7.5 * DAY), month: s => startOf.month(s + 32 * DAY) };
+const slotLabel = { day: s => new Date(s * 1000).toLocaleDateString(LOCALE(), { weekday: "short", day: "numeric" }),
+  week: s => new Date(s * 1000).toLocaleDateString(LOCALE(), { day: "numeric", month: "short" }),
+  month: s => new Date(s * 1000).toLocaleDateString(LOCALE(), { month: "short", year: "2-digit" }) };
+
+/** The figures of a report for the period chosen. */
+function timeFigures(r) {
+  const from = TIME.period === "all" ? 0 : startOf.day(r.now - (Number(TIME.period) - 1) * DAY);
+  const agent = login => r.agents.includes(login);
+  const work = r.work.filter(w => w.at >= from);
+  const costs = r.costs.filter(k => k.at >= from);
+  const byId = Object.fromEntries(r.tickets.map(k => [k.id, k]));
+  const closed = r.tickets.filter(k => k.state === "done" && k.closed >= from);
+  // what an entry of someone costs, in cents; nothing when the rates are not shown to the viewer
+  const cents = w => r.money && !agent(w.login) ? w.minutes * (r.rates[w.login] || 0) / 60 : 0;
+  const unit = TIME.period === "7" ? "day" : TIME.period === "all" ? "month" : "week";
+  const first = work.length ? Math.min(...work.map(w => w.at)) : r.now;
+  const slots = [];
+  for (let s = startOf[unit](TIME.period === "all" ? first : from); s <= r.now; s = nextOf[unit](s)) slots.push(s);
+  const slotOf = at => slots.indexOf(startOf[unit](at));
+  return { from, agent, work, costs, byId, closed, cents, unit, slots: slots.slice(-24), slotOf: at => slotOf(at) - Math.max(0, slots.length - 24),
+    minutes: sum(work, w => w.minutes), people: sum(work.filter(w => !agent(w.login)), w => w.minutes),
+    agents: sum(work.filter(w => agent(w.login)), w => w.minutes), money: sum(work, cents), usd: sum(costs, k => k.usd),
+    lead: closed.length ? sum(closed, k => k.closed - k.created) / closed.length : 0 };
+}
+const amount = (r, cents) => Math.round(cents / 100).toLocaleString(LOCALE()) + " " + r.currency;
+const dollars = usd => usd.toLocaleString(LOCALE(), { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " $";
+/** People in the currency of the rates, agents in dollars: "1 187 € + 9,04 $", or nothing. */
+const cost = (r, cents, usd) => [cents >= 50 && amount(r, cents), usd > 0 && dollars(usd)].filter(Boolean).join(" + ");
+
+/** Rows {key, label, min, cents, usd}, largest first, from the entries and the agent costs grouped by a key. */
+function timeRows(r, f, keyOf, label) {
+  const rows = new Map();
+  const row = k => rows.get(k) || rows.set(k, { key: k, label: label(k), min: 0, cents: 0, usd: 0, slots: f.slots.map(() => 0) }).get(k);
+  for (const w of f.work) {
+    const x = row(keyOf(w)); x.min += w.minutes; x.cents += f.cents(w);
+    const i = f.slotOf(w.at); if (i >= 0) x.slots[i] += w.minutes;
+  }
+  for (const k of f.costs) row(keyOf(k)).usd += k.usd;
+  return [...rows.values()].sort((a, b) => b.min - a.min || b.usd - a.usd);
+}
+const byWho = (r, f) => timeRows(r, f, w => w.login, login => person(login));
+const byPlace = (r, f) => r.scope === "space"
+  ? timeRows(r, f, w => f.byId[w.ticket].project, key => el("a", { href: "#/p/" + key + "/time" }, (r.projects.find(p => p.key === key) || {}).name || key))
+  : timeRows(r, f, w => w.ticket, id => el("span", {}, el("a", { href: "#/t/" + id }, id), " ", f.byId[id].title));
+
+/** The first rows of a long list, and a button to see them all. */
+function limited(name, rows, n, draw) {
+  const all = SHOWN[name] || rows.length <= n + 1;
+  return [draw(all ? rows : rows.slice(0, n)),
+    !all && el("button", { type: "button", class: "quiet more", onclick: () => { SHOWN[name] = true; redraw(); } }, t("Show all ({n})", { n: rows.length }))];
+}
+
+function timeHero(r, f) {
+  const period = TIME.period === "all" ? t("logged since the start") : t("logged over the last {n} days", { n: TIME.period });
+  const fact = (label, value, extra) => el("span", { class: "fact" }, el("small", {}, t(label)), el("b", {}, value), extra && el("span", {}, extra));
+  return el("div", { class: "time-hero" },
+    el("p", { class: "big" }, el("strong", {}, f.minutes ? span(f.minutes) : t("No time")), " ", el("span", {}, period)),
+    el("div", { class: "facts" },
+      fact("People", hours(f.people), r.money && f.money >= 50 ? amount(r, f.money) : ""),
+      fact("Agents", hours(f.agents), f.usd ? dollars(f.usd) : ""),
+      fact("Tickets done", String(f.closed.length), f.closed.length ? t("in {t} on average", { t: clock(f.lead) }) : "")));
+}
+
+/* Summary: bars over time (people, agents), then who and where */
+function timeSummary(r, f) {
+  const stacks = f.slots.map(() => [0, 0]);
+  for (const w of f.work) { const i = f.slotOf(w.at); if (i >= 0) stacks[i][f.agent(w.login) ? 1 : 0] += w.minutes; }
+  const top = Math.max(60, ...stacks.map(([a, b]) => a + b)), n = f.slots.length;
+  const W = 760, H = 190, B = 22, T = 18, bw = Math.min(56, (W / n) * 0.62);
+  const x = i => (i + 0.5) * W / n, y = v => T + (H - B - T) * (1 - v / top);
+  const chart = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "chart", role: "img", "aria-label": t("Time logged over the period") },
+    svg("line", { x1: 0, x2: W, y1: y(0), y2: y(0), class: "grid-line" }),
+    f.slots.map((s, i) => {
+      const [p, a] = stacks[i];
+      return [
+        p > 0 && svg("rect", { x: x(i) - bw / 2, y: y(p), width: bw, height: y(0) - y(p), rx: 3, class: "c1" },
+          svg("title", {}, `${slotLabel[f.unit](s)} · ${t("People")} : ${span(p)}`)),
+        a > 0 && svg("rect", { x: x(i) - bw / 2, y: y(p + a), width: bw, height: Math.max(1, y(p) - y(p + a) - (p ? 2 : 0)), rx: 3, class: "c2" },
+          svg("title", {}, `${slotLabel[f.unit](s)} · ${t("Agents")} : ${span(a)}`)),
+        n <= 14 && p + a > 0 && svg("text", { x: x(i), y: y(p + a) - 5, class: "axis value", "text-anchor": "middle" }, span(p + a)),
+        (n <= 14 || i % Math.ceil(n / 12) === 0) && svg("text", { x: x(i), y: H - 5, class: "axis", "text-anchor": "middle" }, slotLabel[f.unit](s))];
+    }));
+  const list = (title, name, rows, n) => el("div", { class: "card" }, el("h2", {}, t(title)),
+    rows.length ? limited(name, rows, n, shown => el("div", { class: "bars" }, shown.map(x => el("div", { class: "hbar" },
+      el("span", { class: "name" }, x.label),
+      el("span", { class: "track" }, el("span", { class: "fill", style: "width:" + Math.max(x.min ? 1 : 0, Math.round(100 * x.min / (rows[0].min || 1))) + "%" })),
+      el("span", { class: "value" }, hours(x.min)),
+      el("small", {}, cost(r, x.cents, x.usd))))))
+      : el("p", { class: "empty" }, t("No time in this period.")));
+  return [
+    el("div", { class: "card" },
+      el("div", { class: "row" }, el("h2", {}, t({ day: "Per day", week: "Per week", month: "Per month" }[f.unit])),
+        el("span", { class: "legend" }, el("span", {}, el("i", { class: "sw c1" }), t("People")), el("span", {}, el("i", { class: "sw c2" }), t("Agents")))),
+      f.work.length ? chart : el("p", { class: "empty" }, t("No time in this period."))),
+    el("div", { class: "grid two" },
+      list("Who", "who", byWho(r, f), 8),
+      list(r.scope === "space" ? "Which project" : "Which ticket", "place", byPlace(r, f), 8))];
+}
+
+/* Timesheet: one row per person, one column per day, week or month; then the same per project or ticket */
+function timeSheet(r, f) {
+  const sheet = (head, name, rows, n) => el("div", { class: "card table-wrap" }, rows.length ? limited(name, rows, n, shown => el("table", { class: "sheet" },
+    el("thead", {}, el("tr", {}, el("th", {}, t(head)), f.slots.map(s => el("th", { class: "num" }, slotLabel[f.unit](s))),
+      el("th", { class: "num" }, t("Total")), el("th", { class: "num" }, t("Cost")))),
+    el("tbody", {}, shown.map(x => el("tr", {}, el("td", {}, x.label),
+      x.slots.map(m => el("td", { class: "num" + (m ? "" : " none") }, m ? span(m) : "·")),
+      el("td", { class: "num total" }, hours(x.min)), el("td", { class: "num" }, cost(r, x.cents, x.usd) || "–")))),
+    el("tfoot", {}, el("tr", {}, el("td", {}, t("Total")),
+      f.slots.map((s, i) => el("td", { class: "num" }, hours(sum(rows, x => x.slots[i])))),
+      el("td", { class: "num total" }, hours(sum(rows, x => x.min))), el("td", { class: "num" }, cost(r, sum(rows, x => x.cents), sum(rows, x => x.usd)) || "–")))))
+    : el("p", { class: "empty" }, t("No time in this period.")));
+  return [sheet("Person", "who", byWho(r, f), 12), sheet(r.scope === "space" ? "Project" : "Ticket", "place", byPlace(r, f), 10)];
+}
+
+/* Journal: the entries day by day, newest first */
+function timeJournal(r, f) {
+  const days = new Map();
+  for (const w of [...f.work].sort((a, b) => b.at - a.at)) {
+    const d = startOf.day(w.at);
+    days.set(d, [...(days.get(d) || []), w]);
+  }
+  const rows = [...days.entries()];
+  if (!rows.length) return el("div", { class: "card" }, el("p", { class: "empty" }, t("No time in this period.")));
+  return limited("journal", rows, 10, shown => el("div", { class: "journal" }, shown.map(([d, ws]) => el("section", { class: "card" },
+    el("h2", {}, el("span", {}, new Date(d * 1000).toLocaleDateString(LOCALE(), { weekday: "long", day: "numeric", month: "long" })),
+      el("span", { class: "value" }, span(sum(ws, w => w.minutes)))),
+    el("ul", { class: "list" }, ws.map(w => el("li", {},
+      el("span", { class: "entry" }, person(w.login), el("span", {}, el("a", { href: "#/t/" + w.ticket }, w.ticket), " ", f.byId[w.ticket].title,
+        w.note && el("small", {}, " · " + w.note))),
+      el("span", { class: "value" }, span(w.minutes)))))))));
+}
+
+/** For an administrator: what an hour of each person costs. */
+function timeRates(r) {
+  if (!ME.admin) return null;
+  const logins = [...new Set(r.work.map(w => w.login))].filter(l => !r.agents.includes(l)).sort();
+  const inputs = logins.map(l => [l, el("input", { type: "number", min: 0, max: 10000, step: "0.5", value: r.rates[l] ? r.rates[l] / 100 : "", "aria-label": l, placeholder: "0" })]);
+  const currency = el("input", { maxLength: 8, value: r.currency, required: true });
+  return el("details", { class: "card rates" }, el("summary", {}, t("Hourly rates")),
+    el("form", { class: "form", onsubmit: act(async () => {
+      if (currency.value !== r.currency) await api("api/rates", { currency: currency.value });
+      for (const [l, i] of inputs) {
+        const rate = Math.round(Number(i.value || 0) * 100);
+        if (rate !== (r.rates[l] || 0)) await api("api/rates", { login: l, rate });
+      }
+      await route();
+      toast(t("Saved"));
+    }) },
+      el("p", { class: "meta" }, t("What an hour of each person costs. The page multiplies it by the time logged. Only administrators and project owners see the amounts. Agents report their own cost.")),
+      el("div", { class: "fields" }, inputs.map(([l, i]) => el("label", { class: "field" }, person(l), i)), field("Currency", currency)),
+      !logins.length && el("p", { class: "empty" }, t("Nobody logged time yet.")),
+      el("button", { class: "primary" }, t("Save"))));
+}
+
+let redraw = () => {};
+async function timePage(kind, name) {
+  const path = kind === "project" ? "api/projects/" + encodeURIComponent(name) + "/time" : "api/spaces/" + encodeURIComponent(name) + "/time";
+  const r = await api(path);
+  setSpace(r.space);
+  const body = el("div", {}), bar = el("div", { class: "row toolbar" });
+  const toggle = (values, key, label) => el("span", { class: "toggle", role: "group", "aria-label": t(label) }, Object.keys(values).map(v =>
+    el("button", { type: "button", "aria-pressed": String(TIME[key] === v), onclick: () => { TIME[key] = v; saveTime(); redraw(); } }, t(values[v]))));
+  redraw = () => {
+    const f = timeFigures(r);
+    bar.replaceChildren(toggle(PERIODS, "period", "Period"), toggle(VIEWS, "view", "View"));
+    const view = { summary: timeSummary, sheet: timeSheet, journal: timeJournal }[TIME.view] || timeSummary;
+    body.replaceChildren(timeHero(r, f), ...[view(r, f)].flat(Infinity).filter(Boolean));
+  };
+  show(
+    el("div", { class: "top" },
+      el("div", {}, el("h1", {}, t("Time · {name}", { name: r.name || t("No space") })),
+        el("p", { class: "meta" }, kind === "project" ? [r.space, name].filter(Boolean).join(" · ") : tp(r.projects.length, "{n} project", "{n} projects"))),
+      kind === "project" ? el("a", { class: "button", href: "#/p/" + name }, t("Tickets")) : el("a", { class: "button", href: "#/" }, t("Projects"))),
+    bar, body, timeRates(r));
+  redraw();
+}
+
 /* ---------- frame ---------- */
 
 async function route() {
@@ -774,6 +990,8 @@ async function route() {
   LIVE = null;
   try {
     if (h[0] === "p" && h[2] === "members") await members(h[1]);
+    else if (h[0] === "p" && h[2] === "time") await timePage("project", h[1]);
+    else if (h[0] === "e") await timePage("space", decodeURIComponent(h.slice(1).join("/")));
     else if (h[0] === "p" && h[1]) await project(h[1]);
     else if (h[0] === "t" && h[1]) await ticket(h[1]);
     else if (h[0] === "n") await notices();

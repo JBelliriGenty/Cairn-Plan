@@ -84,6 +84,8 @@ pub fn open(path: &str) -> Connection {
     // 0.15.0: the role of the agent a ticket is for, and the parent of a sub-ticket (0: none)
     let _ = c.execute("ALTER TABLE tickets ADD COLUMN agent TEXT NOT NULL DEFAULT ''", []);
     let _ = c.execute("ALTER TABLE tickets ADD COLUMN parent INTEGER NOT NULL DEFAULT 0", []);
+    // 0.18.0: what an hour of someone costs, in cents (0: not set)
+    let _ = c.execute("ALTER TABLE users ADD COLUMN rate INTEGER NOT NULL DEFAULT 0", []);
     c
 }
 
@@ -731,6 +733,161 @@ fn state_seconds(events: &[Value], ticket: &Value, now: i64) -> Value {
         total.insert(state.to_string(), json!(so_far + (until - since).max(0)));
     }
     Value::Object(total)
+}
+
+/// What a time report covers: one project, or the projects of a space the viewer sees.
+pub enum Scope<'a> {
+    Project(&'a str),
+    Space(&'a str),
+}
+
+/// The cost an agent reported at the end of its comment: a last line
+/// "<role> · <model> · 0.46 $". None for any other comment.
+fn reported_usd(body: &str) -> Option<f64> {
+    let last = body.trim_end().lines().last()?.trim();
+    let amount = last.strip_suffix('$')?.trim_end();
+    let (_, value) = amount.rsplit_once(" · ")?;
+    value.trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0)
+}
+
+/// Time of a project or of a space, for the "Time" page: each ticket with
+/// its clock (seconds per state, when it was closed) and the cost its
+/// agents reported, then each entry of logged time. The page adds them up
+/// as it shows them (per week, person, milestone, project). `agents` are
+/// the accounts of the agents (MCP accounts): only their comments carry a
+/// cost, and the page tells their time from the time of people. The hourly
+/// rates of people ("rates", cents per hour) are given to an administrator
+/// and to an owner of the project (of every project shown, for a space).
+pub fn time_report(c: &Connection, a: &Actor, scope: Scope, agents: &[String]) -> R<Value> {
+    let mut money = a.admin;
+    let (kind, name, space, projects): (&str, String, String, Vec<(i64, String, String)>) = match scope {
+        Scope::Project(key) => {
+            let (pid, rank) = access(c, a, key)?;
+            money = rank >= 3;
+            let (pname, pspace): (String, String) =
+                db(c.query_row("SELECT name, space FROM projects WHERE id = ?1", params![pid], |r| Ok((r.get(0)?, r.get(1)?))))?;
+            ("project", pname.clone(), pspace, vec![(pid, key.to_string(), pname)])
+        }
+        Scope::Space(space) => {
+            let mut st = db(c.prepare(
+                "SELECT p.id, p.key, p.name, COALESCE(m.role, '') FROM projects p
+                 LEFT JOIN members m ON m.project = p.id AND m.login = ?1
+                 WHERE p.space = ?3 AND (?2 OR m.role IS NOT NULL) ORDER BY p.name",
+            ))?;
+            let found: Vec<(i64, String, String, String)> = db(db(st
+                .query_map(params![a.login, a.admin, space], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))))?
+            .collect())?;
+            if found.is_empty() {
+                return Err((404, "no such space".into()));
+            }
+            money = a.admin || found.iter().all(|(_, _, _, role)| rank(role) >= 3);
+            ("space", space.to_string(), space.to_string(), found.into_iter().map(|(id, key, name, _)| (id, key, name)).collect())
+        }
+    };
+    let now = now();
+    let (mut tickets, mut work, mut costs) = (Vec::new(), Vec::new(), Vec::new());
+    for (pid, key, _) in &projects {
+        let mut st = db(c.prepare(
+            "SELECT t.id, t.number, t.title, t.state, t.milestone, t.agent, t.assignee, t.created,
+                    COALESCE((SELECT number FROM tickets p WHERE p.id = t.parent), 0)
+             FROM tickets t WHERE t.project = ?1 ORDER BY t.number",
+        ))?;
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(i64, i64, String, String, String, String, String, i64, i64)> = db(db(st.query_map(params![pid], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
+        }))?
+        .collect())?;
+        for (tid, number, title, state, milestone, agent, assignee, created, parent) in rows {
+            let mut st = db(c.prepare(
+                "SELECT field, new, at FROM events WHERE ticket = ?1 AND field IN ('created', 'state') ORDER BY id DESC",
+            ))?;
+            let events: Vec<Value> = db(db(st.query_map(params![tid], |r| {
+                Ok(json!({ "field": r.get::<_, String>(0)?, "new": r.get::<_, String>(1)?, "at": r.get::<_, i64>(2)? }))
+            }))?
+            .collect())?;
+            let ticket = json!({ "state": state, "created": created });
+            let closed = if state == "done" || state == "cancelled" {
+                events.iter().find(|e| e["field"] == "state").and_then(|e| e["at"].as_i64()).unwrap_or(created)
+            } else {
+                0
+            };
+            let id = format!("{key}-{number}");
+            // what each run of an agent cost: the last line of its report, dated by the comment
+            let mut st = db(c.prepare("SELECT author, body, created FROM comments WHERE ticket = ?1 ORDER BY id"))?;
+            let mut usd = 0.0;
+            for row in db(st.query_map(params![tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))))? {
+                let (author, body, at) = db(row)?;
+                if let Some(v) = reported_usd(&body).filter(|_| agents.contains(&author)) {
+                    usd += v;
+                    costs.push(json!({ "ticket": id, "login": author, "usd": v, "at": at }));
+                }
+            }
+            let mut st = db(c.prepare("SELECT login, minutes, at, note FROM worklogs WHERE ticket = ?1 ORDER BY at, id"))?;
+            let entries: Vec<Value> = db(db(st.query_map(params![tid], |r| {
+                Ok(json!({
+                    "ticket": id, "login": r.get::<_, String>(0)?, "minutes": r.get::<_, i64>(1)?, "at": r.get::<_, i64>(2)?,
+                    "note": r.get::<_, String>(3)?,
+                }))
+            }))?
+            .collect())?;
+            work.extend(entries);
+            tickets.push(json!({
+                "id": id, "project": key, "title": title, "state": state, "milestone": milestone, "agent": agent,
+                "assignee": assignee, "parent": if parent > 0 { format!("{key}-{parent}") } else { String::new() },
+                "created": created, "closed": closed, "states": state_seconds(&events, &ticket, now),
+                "usd": (usd * 100.0).round() / 100.0,
+            }));
+        }
+    }
+    let mut agents: Vec<&String> = agents.iter().collect();
+    agents.sort();
+    agents.dedup();
+    let mut rates = serde_json::Map::new();
+    if money {
+        let mut st = db(c.prepare("SELECT login, rate FROM users WHERE rate > 0"))?;
+        for row in db(st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))))? {
+            let (login, rate) = db(row)?;
+            rates.insert(login, json!(rate));
+        }
+    }
+    let currency = settings(c).remove("currency").filter(|v| !v.is_empty()).unwrap_or_else(|| "€".to_string());
+    Ok(json!({
+        "scope": kind, "name": name, "space": space, "now": now, "agents": agents,
+        "money": money, "rates": rates, "currency": currency,
+        "projects": projects.iter().map(|(_, key, name)| json!({ "key": key, "name": name })).collect::<Vec<_>>(),
+        "tickets": tickets, "work": work, "costs": costs,
+    }))
+}
+
+/// {"login": "lea", "rate": 6500} sets what an hour of someone costs, in cents
+/// (0: not set); {"currency": "€"} sets the sign shown after an amount. For
+/// an administrator.
+pub fn set_rate(c: &Connection, a: &Actor, v: &Value) -> R<Value> {
+    if !a.admin {
+        return denied("only an administrator can set an hourly rate");
+    }
+    if let Some(currency) = text(v, "currency") {
+        if currency.is_empty() || currency.chars().count() > 8 || currency.chars().any(char::is_control) {
+            return bad("invalid currency");
+        }
+        db(c.execute(
+            "INSERT INTO settings(key, value) VALUES ('currency', ?1) ON CONFLICT(key) DO UPDATE SET value = ?1",
+            params![currency],
+        ))?;
+    }
+    if let Some(login) = text(v, "login") {
+        let rate = v["rate"].as_i64().unwrap_or(-1);
+        // a million cents: ten thousand an hour at most
+        if !(0..=1_000_000).contains(&rate) {
+            return bad("invalid rate");
+        }
+        if db(c.execute("UPDATE users SET rate = ?1 WHERE login = ?2", params![rate, login]))? == 0 {
+            return Err((404, "no such person".into()));
+        }
+    } else if !v["currency"].is_string() {
+        return bad("invalid request");
+    }
+    Ok(json!({ "ok": true }))
 }
 
 /// {"minutes": 90, "day": "2026-11-18", "note": "..."} logs time someone
@@ -1583,6 +1740,60 @@ mod tests {
         ];
         assert_eq!(state_seconds(&events, &json!({}), 1000), json!({"todo": 60, "in_progress": 200, "waiting": 100, "done": 0}));
         assert_eq!(state_seconds(&events[3..], &json!({}), 1000), json!({"todo": 60, "in_progress": 100, "waiting": 800}));
+    }
+
+    #[test]
+    fn time_is_reported_per_project_and_per_space() {
+        let c = setup();
+        let (jane, lea, eve) = (who("jane", true), who("lea", false), who("eve", false));
+        let agents = vec!["claude".to_string()];
+        set_member(&c, &jane, "SHOP", &json!({"login": "claude", "role": "contributor"})).unwrap();
+        let claude = who("claude", false);
+        update_project(&c, &jane, "SHOP", &json!({"space": "Acme"})).unwrap();
+        create_project(&c, &jane, &json!({"key": "DEMO", "name": "Demo", "space": "Acme"})).unwrap();
+        create_ticket(&c, &jane, "SHOP", &json!({"title": "Epic", "state": "todo", "milestone": "M1"})).unwrap();
+        create_ticket(&c, &jane, "SHOP", &json!({"title": "Part", "parent": "SHOP-1"})).unwrap();
+        log_work(&c, &lea, "SHOP-1", &json!({"minutes": 90, "day": "2026-11-18"})).unwrap();
+        log_work(&c, &claude, "SHOP-2", &json!({"minutes": 7})).unwrap();
+        comment(&c, &claude, "SHOP-2", &json!({"body": "Done: PR 3.\n\ndev · some-model · 0.46 $"})).unwrap();
+        comment(&c, &claude, "SHOP-2", &json!({"body": "Second run.\n\ndev · some-model · 0.10 $\n"})).unwrap();
+        comment(&c, &lea, "SHOP-2", &json!({"body": "I paid · 9 $"})).unwrap(); // not an agent: no cost
+        update_ticket(&c, &jane, "SHOP-1", &json!({"state": "done"})).unwrap();
+
+        let p = time_report(&c, &lea, Scope::Project("SHOP"), &agents).unwrap();
+        assert_eq!((p["scope"].as_str(), p["space"].as_str(), p["tickets"].as_array().unwrap().len()), (Some("project"), Some("Acme"), 2));
+        let t1 = &p["tickets"][0];
+        assert_eq!((t1["id"].as_str(), t1["milestone"].as_str(), t1["state"].as_str()), (Some("SHOP-1"), Some("M1"), Some("done")));
+        assert!(t1["closed"].as_i64().unwrap() > 0 && t1["states"]["todo"].is_i64());
+        let t2 = &p["tickets"][1];
+        assert_eq!((t2["parent"].as_str(), t2["closed"].as_i64(), t2["usd"].as_f64()), (Some("SHOP-1"), Some(0), Some(0.56)));
+        let minutes: Vec<i64> = p["work"].as_array().unwrap().iter().map(|w| w["minutes"].as_i64().unwrap()).collect();
+        assert_eq!(minutes, vec![90, 7]);
+        assert_eq!(p["agents"], json!(["claude"]));
+        let costs: Vec<(&str, f64)> = p["costs"].as_array().unwrap().iter().map(|k| (k["login"].as_str().unwrap(), k["usd"].as_f64().unwrap())).collect();
+        assert_eq!(costs, vec![("claude", 0.46), ("claude", 0.10)]);
+
+        // the space: every project of it the viewer sees, only those
+        let s = time_report(&c, &jane, Scope::Space("Acme"), &agents).unwrap();
+        assert_eq!(s["projects"].as_array().unwrap().len(), 2);
+        assert_eq!(time_report(&c, &lea, Scope::Space("Acme"), &agents).unwrap()["projects"], json!([{"key": "SHOP", "name": "Shop"}]));
+        assert!(time_report(&c, &eve, Scope::Space("Acme"), &agents).is_err());
+        assert!(time_report(&c, &eve, Scope::Project("SHOP"), &agents).is_err());
+        assert_eq!((reported_usd("x\n\ndoc · m · 0.08 $"), reported_usd("costs 3 $"), reported_usd("a · b · -1 $")), (Some(0.08), None, None));
+
+        // hourly rates: set by an administrator, shown to an owner of the project, not to a contributor
+        seen(&c, "lea", "Lea", "");
+        assert!(set_rate(&c, &lea, &json!({"login": "lea", "rate": 6500})).is_err());
+        assert!(set_rate(&c, &jane, &json!({"login": "lea", "rate": -1})).is_err());
+        assert!(set_rate(&c, &jane, &json!({"login": "nobody", "rate": 10})).is_err());
+        set_rate(&c, &jane, &json!({"login": "lea", "rate": 6500, "currency": "CHF"})).unwrap();
+        let p = time_report(&c, &jane, Scope::Project("SHOP"), &agents).unwrap();
+        assert_eq!((p["money"].as_bool(), p["rates"]["lea"].as_i64(), p["currency"].as_str()), (Some(true), Some(6500), Some("CHF")));
+        let p = time_report(&c, &lea, Scope::Project("SHOP"), &agents).unwrap();
+        assert_eq!((p["money"].as_bool(), p["rates"].as_object().unwrap().len()), (Some(false), 0));
+        set_member(&c, &jane, "SHOP", &json!({"login": "lea", "role": "owner"})).unwrap();
+        assert_eq!(time_report(&c, &lea, Scope::Project("SHOP"), &agents).unwrap()["rates"]["lea"], 6500);
+        assert_eq!(time_report(&c, &lea, Scope::Space("Acme"), &agents).unwrap()["money"], true); // owner of all she sees
     }
 
     #[test]

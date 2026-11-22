@@ -481,7 +481,7 @@ def budget_of(conf, name, usd):
     return conf["budgets"][name]
 
 
-def close_parent(conf, team, parent_id, words):
+def close_parent(conf, team, parent_id, words, closed_id=None):
     """After a sub-ticket: queue the parts still to do (a role that waited may go now),
     and close the parent, under the lead's account, once every part is closed."""
     lead = team["roles"][team["lead"]]["key"]
@@ -492,8 +492,11 @@ def close_parent(conf, team, parent_id, words):
     for k in left:
         role = team["roles"].get(role_for(k, team)) or {}
         job = {"event": "ticket.approved", "ticket": k["id"]}
+        if closed_id:  # the log then says which closing woke the part
+            job["woken_by"] = f"ticket.closed {closed_id}"
         # a role that waits goes once nothing it waits for is open; never twice in the queue
-        if k["state"] == "todo" and not (role.get("waits") and waits_for(parent, k["id"])) and job not in JOBS.queue:
+        queued = [j.get("ticket") for j in list(JOBS.queue)]
+        if k["state"] == "todo" and not (role.get("waits") and waits_for(parent, k["id"])) and k["id"] not in queued:
             JOBS.put(job)
     if not left:
         mcp(conf, "finish_ticket", key=lead, id=parent_id, report=summary(parent, words))
@@ -509,7 +512,7 @@ def closed(conf, call):
         return
     kid = mcp(conf, "get_ticket", key=team["roles"][team["lead"]]["key"], id=tid)
     if kid.get("parent"):
-        close_parent(conf, team, kid["parent"], TEXT[conf["lang"]])
+        close_parent(conf, team, kid["parent"], TEXT[conf["lang"]], tid)
 
 
 def work(conf, call, templates):
@@ -546,7 +549,7 @@ def work(conf, call, templates):
         ticket = mcp(conf, "take_ticket", key=key, id=tid)
     except Refused as e:
         return say(f"not taken: {e}")
-    say(f"taken ({call['event']})")
+    say(f"taken ({call.get('woken_by') or call['event']})")
     template = templates[role.get("prompt", "prompt.md")]
     others = {n: r.get("text", "") for n, r in (team or {}).get("roles", {}).items() if n != name}
     started, text = time.time(), TEXT[conf["lang"]]
@@ -610,7 +613,7 @@ def work(conf, call, templates):
             url = open_pr(conf, repo, base, branch, f"{tid}: {ticket['title']}", body)
             mcp(conf, "add_link", key=key, id=tid, url=url, title=f"PR: {ticket['title']}"[:200])
             report += "\n\n" + text["pr"].format(url=url)
-        cost = f"\n\n{name} · {role.get('model') or conf['model'] or '-'} · {usd:.2f} $" if team else ""
+        cost = f"\n\n{name} · {role.get('model') or conf['model'] or '-'} · {usd:.2f} $"
         if role.get("splits"):
             # the lead splits and builds nothing: the parent stays in progress until its parts are closed
             parts = now.get("children") or []

@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.18.0
+
+- New page "Time" for each project (button "Time" of the project) and for
+  each space (entry "Time" of the menu). It says the hours logged over the
+  period (7, 30, 90 days, or all), split between people and agents, and the
+  tickets done with their average lead time. Three views: Summary (bars per
+  day, week or month, then who and which project or ticket), Timesheet
+  (people in rows, days, weeks or months in columns, totals) and Journal
+  (the entries day by day).
+- Hourly rates: an administrator sets what an hour of each person costs
+  and the currency, at the bottom of the page. The page multiplies the rate
+  by the time logged. Only administrators and project owners see amounts
+  (for a space: owners of every project shown).
+- Agent cost: the page adds up the cost agents write at the end of their
+  report, dated by the comment. The agent now writes it for every ticket,
+  not only in a team.
+- People are shown with their initials on a disc, one colour per person; a
+  square is an agent (an MCP account).
+- API: `GET /api/projects/<KEY>/time`, `GET /api/spaces/<space>/time`,
+  `POST /api/rates`.
+
+## 0.17.2
+
+- The agent log names the closing that woke a part:
+  `[doc] SHOP-73: taken (ticket.closed SHOP-72)`, no longer
+  `taken (ticket.approved)`. A part is still queued only once, whatever
+  woke it.
+
 ## 0.17.1
 
 - A diagram that fails to draw no longer makes the other diagrams of the

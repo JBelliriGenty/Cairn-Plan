@@ -172,7 +172,8 @@ fam["children"][1]["state"] = "done"
 for _ in range(2):
     agent.work({"teams": {"SHOP": team}, "lang": "fr"}, closed, {})
 agent.mcp = real_mcp
-assert [agent.JOBS.get_nowait() for _ in range(agent.JOBS.qsize())] == [{"event": "ticket.approved", "ticket": "SHOP-72"}]
+assert [agent.JOBS.get_nowait() for _ in range(agent.JOBS.qsize())] == [
+    {"event": "ticket.approved", "ticket": "SHOP-72", "woken_by": "ticket.closed SHOP-71"}]
 said = agent.summary(parent, agent.TEXT["fr"])
 assert "SHOP-71 (dev) : Code, terminé" in said and said.startswith("Tous les sous-tickets"), said
 

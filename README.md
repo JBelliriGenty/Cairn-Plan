@@ -10,6 +10,9 @@ password of its own.
   projects, and a switch changes space. Rights stay per project.
 - **List or board.** The tickets of a project as a table or as one column
   per state, with search and filters; drag a card to change its state.
+- **Time per project and per space.** Hours logged by people and agents,
+  what they cost (an hourly rate per person, the cost agents report), and
+  the tickets done: as a summary, a timesheet or a journal.
 - **Three roles per project.** A reader reads and comments. A contributor
   creates and edits tickets. An owner approves tickets and manages members.
 - **Approval belongs to owners.** A new ticket is a proposal. Only a project

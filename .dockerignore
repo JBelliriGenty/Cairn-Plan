@@ -1,0 +1,8 @@
+# Only what the build reads (the tests read docs/configuration.md): a change
+# to the agent, the README or the changelog leaves the image as it is.
+*
+!Cargo.toml
+!Cargo.lock
+!src
+!www
+!docs

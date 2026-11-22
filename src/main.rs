@@ -368,6 +368,11 @@ fn serve_hook(cfg: &Config, mut r: Request) {
     respond(r, 200, json!({ "linked": linked }).to_string(), "application/json")
 }
 
+/// The accounts MCP calls run as: those of the agents.
+fn agent_logins(cfg: &Config) -> Vec<String> {
+    std::iter::once(cfg.mcp_login.clone()).chain(cfg.mcp_accounts.values().cloned()).collect()
+}
+
 fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let (mut out, mut i) = (Vec::with_capacity(b.len()), 0);
@@ -657,6 +662,7 @@ fn handle(cfg: &'static Config, mut r: Request) {
                 "ntfy": outside(cfg, &saved).ntfy.is_some(), "ntfy_topic": store::ntfy_topic(&c, &who.login),
                 "ntfy_prefix": saved.get("ntfy_prefix").map(String::as_str).unwrap_or(""),
                 "version": env!("CARGO_PKG_VERSION"), "states": store::STATES, "priorities": store::PRIORITIES,
+                "agents": agent_logins(cfg),
             }))
         }
         (Method::Post, ["api", "me"]) => store::set_prefs(&c, &who, &body),
@@ -677,6 +683,11 @@ fn handle(cfg: &'static Config, mut r: Request) {
         (Method::Post, ["api", "tickets", id, "comments"]) => store::comment(&c, &who, id, &body),
         (Method::Post, ["api", "tickets", id, "links"]) => store::link(&c, &who, id, &body),
         (Method::Post, ["api", "tickets", id, "work"]) => store::log_work(&c, &who, id, &body),
+        (Method::Post, ["api", "rates"]) => store::set_rate(&c, &who, &body),
+        (Method::Get, ["api", "projects", key, "time"]) => store::time_report(&c, &who, store::Scope::Project(key), &agent_logins(cfg)),
+        (Method::Get, ["api", "spaces", name, "time"]) => {
+            store::time_report(&c, &who, store::Scope::Space(&percent_decode(name)), &agent_logins(cfg))
+        }
         _ => Err((404, "not found".to_string())),
     };
     drop(c);

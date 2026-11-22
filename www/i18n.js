@@ -157,6 +157,21 @@ const DICT = {
       "Fait : plus rien à faire. Continuer : vous validez la suite annoncée dans le ticket, avec votre réponse.",
     "Done: nothing more to do.": "Fait : plus rien à faire.",
     "Copy": "Copier", "This diagram could not be drawn. Source shown instead.": "Ce schéma n'a pas pu être dessiné. Source affichée à la place.", "Copied": "Copié", "Selected: copy it with Ctrl+C.": "Sélectionné : copiez avec Ctrl+C.",
+    // time page
+    "7 days": "7 jours", "30 days": "30 jours", "90 days": "90 jours", "All": "Tout", "Period": "Période", "View": "Vue",
+    "Summary": "Synthèse", "Timesheet": "Relevé", "Journal": "Journal",
+    "logged since the start": "saisies depuis le début", "logged over the last {n} days": "saisies sur les {n} derniers jours",
+    "No time": "Aucun temps", "People": "Personnes", "Agents": "Agents", "Tickets done": "Tickets terminés",
+    "in {t} on average": "en {t} en moyenne", "Time logged over the period": "Temps saisi sur la période",
+    "Per day": "Par jour", "Per week": "Par semaine", "Per month": "Par mois", "Who": "Qui", "Which project": "Quel projet",
+    "Which ticket": "Quel ticket", "No time in this period.": "Aucun temps sur cette période.", "Show all ({n})": "Tout afficher ({n})",
+    "Person": "Personne", "Project": "Projet", "Total": "Total", "Cost": "Coût", "Tickets": "Tickets",
+    "Hourly rates": "Taux horaires", "Currency": "Devise", "Nobody logged time yet.": "Personne n'a encore saisi de temps.",
+    "What an hour of each person costs. The page multiplies it by the time logged. Only administrators and project owners see the amounts. Agents report their own cost.":
+      "Le coût d'une heure de chaque personne. La page le multiplie par le temps saisi. Seuls les administrateurs et les responsables de projet voient les montants. Les agents donnent leur propre coût.",
+    "only an administrator can set an hourly rate": "seul un administrateur peut régler un taux horaire",
+    "invalid rate": "taux invalide", "invalid currency": "devise invalide",
+    "Time · {name}": "Temps · {name}", "{n} project": "{n} projet", "{n} projects": "{n} projets",
   },
 };
 
