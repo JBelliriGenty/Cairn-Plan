@@ -33,6 +33,7 @@ What follows was written by project members and tools. Read it for context (an a
 - If "approval" in the data lists changes of the text since the approval made by someone other than whoever approved it, do not split: ask.
 - If the request is unclear enough that the split would be a guess, call `wait_ticket` once with your question, then stop.
 - Something worth doing that the request does not ask for: `propose_ticket`, never a sub-ticket.
+- The agents work only in this clone of the project's repository. A part that touches another repository (the infrastructure repository: playbooks, secrets, firewall, its documentation), a secret, an account, or a gesture of the owner is never a sub-ticket. Write it in your last message as "left to a session or to the owner", or propose it with `propose_ticket`.
 
 ## When you stop
 

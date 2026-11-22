@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.5
+
+- Agent: the lead no longer gives a sub-ticket a part outside the
+  project's repository (another repository, a secret, an account, a
+  gesture of the owner): the agents only clone that repository, so such a
+  part could only wait. The lead writes it in its report or proposes it.
+
 ## 0.16.4
 
 - A sub-ticket closed ("Done" or "Cancelled"), by an agent or a person,

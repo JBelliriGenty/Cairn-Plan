@@ -118,6 +118,10 @@ its account (`{"agent-dev": "claude-dev"}`), and `cairn-plan member
    who cuts them and that the parent's text did not change since; the
    agent that builds one is told the parent is its frame and asks when a
    part goes beyond it).
+   Only work inside the project's repository becomes a sub-ticket: a part
+   in another repository (the infrastructure one), a secret, an account
+   or a gesture of the owner is written in the lead's report ("left to a
+   session or to the owner") or proposed with `propose_ticket`.
 2. Each sub-ticket goes to the agent of its role, which works as the one
    agent does, under its own account and model. The files it changed are
    checked against the `paths` of its role before anything is pushed: a
