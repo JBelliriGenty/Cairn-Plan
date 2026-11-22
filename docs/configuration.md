@@ -198,12 +198,13 @@ settings page, section "Agent", or with `agent_hook_url` and
 `agent_hook_secret_file`. The [agent](../agent/README.md) shipped with
 Cairn Plan listens to it.
 
-Two events are sent, as a `POST` with a JSON body:
+Three events are sent, as a `POST` with a JSON body:
 
 | `event` | When |
 |---|---|
 | `ticket.approved` | a project owner moved a ticket to "To do" (or created it there) |
 | `ticket.answered` | whoever approved a ticket that is "Waiting" commented it |
+| `ticket.closed` | a sub-ticket became "Done" or "Cancelled" (whoever did it): the part that waited for it may start |
 
 ```json
 {"event": "ticket.approved", "ticket": "SHOP-52", "project": "SHOP",

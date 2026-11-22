@@ -101,7 +101,7 @@ use another file); `AGENT_TEAMS` picks them per project:
 
 ```json
 {"SHOP": {"lead": "chef", "roles": {
-  "chef": {"model": "claude-fable-5-2", "usd": 8},
+  "chef": {"model": "claude-opus-5-5", "usd": 8},
   "dev": {"model": "claude-opus-5-5", "usd": 15},
   "doc": {"model": "claude-sonnet-5-5", "usd": 4}}}}
 ```
@@ -126,6 +126,8 @@ its account (`{"agent-dev": "claude-dev"}`), and `cairn-plan member
    with the list.
 3. A role that `waits` (the writer) starts once the other parts are
    closed, and finds their branches in its clone (`origin/agent/<id>`).
+   Each closed part, whoever closed it (an agent or a person), sends
+   `ticket.closed`: the waiting part starts then, not at the next catch-up.
 4. Once every part is closed, the parent is closed by the lead's account
    with the list of parts.
 

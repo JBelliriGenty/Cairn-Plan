@@ -155,6 +155,24 @@ parent = {"id": "SHOP-70", "title": "Epic", "description": "All of it", "childre
 assert agent.waits_for(parent, "SHOP-72") == ["SHOP-71"]
 parent["children"][0]["state"] = "done"
 assert agent.waits_for(parent, "SHOP-72") == []
+# a part closed (ticket.closed): the writer goes once the others are closed, not before,
+# and a ticket is never queued twice
+team = {"lead": "chef", "roles": {"chef": {"key": "k"}, "dev": {}, "doc": {"waits": True}}}
+fam = {"id": "SHOP-70", "state": "in_progress", "children": [
+    {"id": "SHOP-71", "agent": "dev", "state": "done"},
+    {"id": "SHOP-74", "agent": "dev", "state": "in_progress"},
+    {"id": "SHOP-72", "agent": "doc", "state": "todo"}]}
+def fam_mcp(conf, tool, **args):
+    return {"id": args["id"], "parent": "SHOP-70"} if args["id"] != "SHOP-70" else fam
+real_mcp, agent.mcp = agent.mcp, fam_mcp
+closed = {"event": "ticket.closed", "ticket": "SHOP-71"}
+agent.work({"teams": {"SHOP": team}, "lang": "fr"}, closed, {})
+assert agent.JOBS.empty()  # SHOP-74 (dev) still open: the writer waits
+fam["children"][1]["state"] = "done"
+for _ in range(2):
+    agent.work({"teams": {"SHOP": team}, "lang": "fr"}, closed, {})
+agent.mcp = real_mcp
+assert [agent.JOBS.get_nowait() for _ in range(agent.JOBS.qsize())] == [{"event": "ticket.approved", "ticket": "SHOP-72"}]
 said = agent.summary(parent, agent.TEXT["fr"])
 assert "SHOP-71 (dev) : Code, terminé" in said and said.startswith("Tous les sous-tickets"), said
 

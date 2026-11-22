@@ -41,7 +41,7 @@ import urllib.parse
 import urllib.request
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-EVENTS = ("ticket.approved", "ticket.answered")
+EVENTS = ("ticket.approved", "ticket.answered", "ticket.closed")
 # What Claude may use. Taking and closing the ticket stay with this program.
 TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Bash",
          "mcp__plan__get_ticket", "mcp__plan__comment_ticket", "mcp__plan__wait_ticket", "mcp__plan__propose_ticket"]
@@ -490,14 +490,31 @@ def close_parent(conf, team, parent_id, words):
         return
     left = [k for k in parent.get("children") or [] if k["state"] not in ("done", "cancelled")]
     for k in left:
-        if k["state"] == "todo":
-            JOBS.put({"event": "ticket.approved", "ticket": k["id"]})
+        role = team["roles"].get(role_for(k, team)) or {}
+        job = {"event": "ticket.approved", "ticket": k["id"]}
+        # a role that waits goes once nothing it waits for is open; never twice in the queue
+        if k["state"] == "todo" and not (role.get("waits") and waits_for(parent, k["id"])) and job not in JOBS.queue:
+            JOBS.put(job)
     if not left:
         mcp(conf, "finish_ticket", key=lead, id=parent_id, report=summary(parent, words))
         log(f"[{team['lead']}] {parent_id}: every sub-ticket is closed, done")
 
 
+def closed(conf, call):
+    """A sub-ticket was closed, by an agent or a person (ticket.closed): what follows
+    it under the same parent is queued, and the parent closed once every part is."""
+    tid = call["ticket"]
+    team = conf["teams"].get(tid.rsplit("-", 1)[0])
+    if not team:
+        return
+    kid = mcp(conf, "get_ticket", key=team["roles"][team["lead"]]["key"], id=tid)
+    if kid.get("parent"):
+        close_parent(conf, team, kid["parent"], TEXT[conf["lang"]])
+
+
 def work(conf, call, templates):
+    if call.get("event") == "ticket.closed":
+        return closed(conf, call)
     tid = call["ticket"]
     project = tid.rsplit("-", 1)[0]  # from the id, not from what else the call says
     repo = conf["repos"].get(project)
@@ -554,8 +571,8 @@ def work(conf, call, templates):
             report, usd = claude(conf, job, fill(template, ticket, parent, ("Your role in the team: " + role["text"]) if role.get("text") else "", others), role)
         except RuntimeError as e:
             budget.add(usd=getattr(e, "usd", 0.0))
-            if re.search(r"(?i)usage limit|rate limit|quota|credit balance", str(e)):
-                budget.add(paused="Claude said its limit is reached")
+            if re.search(r"(?i)usage limit|rate limit|quota|credit balance|usage credits", str(e)):
+                budget.add(paused="Claude said its limit is reached")  # this role only, its own budget
             raise
         budget.add(usd=usd)
         # nothing Claude left running may touch what comes next

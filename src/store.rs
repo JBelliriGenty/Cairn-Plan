@@ -515,6 +515,13 @@ pub fn update_ticket(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value>
                 if new == "todo" {
                     announce(c, tid, "ticket.approved", &a.login)?;
                 }
+                // a part closed, by an agent or a person: the part that waited for it may go
+                if new == "done" || new == "cancelled" {
+                    let parent: i64 = db(c.query_row("SELECT parent FROM tickets WHERE id = ?1", params![tid], |r| r.get(0)))?;
+                    if parent != 0 {
+                        announce(c, tid, "ticket.closed", &a.login)?;
+                    }
+                }
                 if new == "cancelled" {
                     // cancelling a parent stops its sub-tickets: one gesture keeps the owner in charge
                     let mut st = db(c.prepare("SELECT id, state FROM tickets WHERE parent = ?1 AND state NOT IN ('done', 'cancelled')"))?;
@@ -1323,7 +1330,10 @@ mod tests {
         assert!(hook_outbox(&c).iter().any(|h| h.event == "ticket.answered" && h.ticket == "SHOP-3"));
         // the parent shows its progress
         kid(&lea, "SHOP-1", "todo").unwrap();
+        hook_outbox(&c);
         update_ticket(&c, &jane, "SHOP-3", &json!({"state": "done"})).unwrap();
+        let closed: Vec<String> = hook_outbox(&c).iter().map(|h| format!("{} {}", h.event, h.ticket)).collect();
+        assert_eq!(closed, ["ticket.closed SHOP-3"]);
         let p = ticket_view(&c, &jane, "SHOP-1").unwrap();
         assert_eq!((p["progress"]["done"].as_i64(), p["progress"]["total"].as_i64(), p["children"].as_array().unwrap().len()), (Some(1), Some(2), 2));
         let listed = project(&c, &jane, "SHOP").unwrap();
@@ -1339,6 +1349,8 @@ mod tests {
         assert_eq!(kid(&jane, "SHOP-1", "backlog").unwrap_err().0, 400);
         // cancelling the parent cancels what is still open
         update_ticket(&c, &jane, "SHOP-1", &json!({"state": "cancelled"})).unwrap();
+        // a ticket without a parent closes without a call
+        assert!(hook_outbox(&c).iter().all(|h| h.event != "ticket.closed"));
         let p = ticket_view(&c, &jane, "SHOP-1").unwrap();
         let states: Vec<&str> = p["children"].as_array().unwrap().iter().map(|k| k["state"].as_str().unwrap()).collect();
         assert!(states.iter().all(|s| *s == "done" || *s == "cancelled") && states.contains(&"done"), "{states:?}");

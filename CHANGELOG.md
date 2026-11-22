@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.16.4
+
+- A sub-ticket closed ("Done" or "Cancelled"), by an agent or a person,
+  sends `ticket.closed`. The agent then starts the part that waited for it
+  (the writer once the code is done) and closes the parent once every part
+  is, instead of waiting for its hourly catch-up.
+
+## 0.16.3
+
+- Agent: "out of usage credits" (a model the subscription does not cover)
+  pauses the role until the next day, like a usage limit, instead of
+  failing every ticket of that role. The example team leads with Opus.
+
 ## 0.16.2
 
 - Authelia's userinfo answers with no audience at all: the audience and
