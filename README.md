@@ -108,6 +108,11 @@ chose on the page "My profile". A square is an agent; an administrator
 chooses its photo. See
 [docs/configuration.md](docs/configuration.md#profile-photos).
 
+![My profile](docs/screenshots/profile.png)
+
+"My profile": your photo, framed before it is saved; for an administrator,
+the photos of the agents and of the other people.
+
 ## Settings
 
 Once the service runs, an administrator sets the rest from the page: the
