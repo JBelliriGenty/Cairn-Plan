@@ -102,6 +102,12 @@ fn subjects(p: &Value) -> Vec<(String, String, String)> {
             format!("{}\n{}\n{}", s(&pr["title"]), s(&pr["body"]), s(&pr["head"]["ref"])),
         ));
     }
+    // a document a commit writes is shown from the main branch: only a push to it counts
+    let repo = &p["repository"];
+    let (home, branch) = (s(&repo["html_url"]), s(&repo["default_branch"]));
+    let on_main = !home.is_empty() && !branch.is_empty() && s(&p["ref"]) == format!("refs/heads/{branch}");
+    // GitHub shows a file under /blob/, Forgejo and Gitea under /src/branch/
+    let files = format!("{home}/{}/{branch}", if home.starts_with("https://github.com/") { "blob" } else { "src/branch" });
     for c in p["commits"].as_array().into_iter().flatten() {
         let (id, message) = (s(&c["id"]), s(&c["message"]));
         out.push((
@@ -109,6 +115,12 @@ fn subjects(p: &Value) -> Vec<(String, String, String)> {
             format!("Commit {}: {}", id.get(..7).unwrap_or(id), message.lines().next().unwrap_or("")),
             message.to_string(),
         ));
+        // the documents (Markdown) the commit adds or changes: the ticket it names shows them
+        for path in c["added"].as_array().into_iter().chain(c["modified"].as_array()).flatten().filter_map(Value::as_str) {
+            if on_main && path.ends_with(".md") && !path.ends_with("CHANGELOG.md") {
+                out.push((format!("{files}/{}", path.replace(' ', "%20")), format!("Doc: {path}"), message.to_string()));
+            }
+        }
     }
     out
 }
@@ -157,6 +169,31 @@ mod tests {
         assert_eq!((sent["event"].as_str(), sent["ticket"].as_str(), sent["by"].as_str(), sent["at"].as_i64()), (Some("ticket.approved"), Some("SHOP-1"), Some("jane"), Some(7)));
         assert!(signed("secret", body(&call).as_bytes(), &signature("secret", body(&call).as_bytes())));
         assert!(send("http://127.0.0.1:9", "", &call).is_err()); // never unsigned
+    }
+
+    #[test]
+    fn a_document_written_on_the_main_branch_is_attached() {
+        let c = store::open(":memory:");
+        let jane = Actor { login: "jane".into(), admin: true };
+        store::create_project(&c, &jane, &json!({"key": "SHOP", "name": "Shop"})).unwrap();
+        store::create_ticket(&c, &jane, "SHOP", &json!({"title": "Guide"})).unwrap();
+        let push = |branch: &str| {
+            json!({"ref": branch, "repository": {"html_url": "https://git.example.org/lab/app", "default_branch": "main"},
+                   "commits": [{"id": "0123456789", "url": "https://git.example.org/lab/app/commit/0123456789", "message": "SHOP-1: write the guide",
+                                "added": ["docs/user guide.md"], "modified": ["CHANGELOG.md", "src/main.rs"]}]})
+        };
+        let links = |c: &Connection| store::ticket_view(c, &jane, "SHOP-1").unwrap()["links"].clone();
+        // on another branch: the commit only
+        handle(&c, &push("refs/heads/topic"));
+        assert_eq!(links(&c).as_array().unwrap().len(), 1);
+        // on the main branch: the document too, never the changelog nor the code
+        handle(&c, &push("refs/heads/main"));
+        let all = links(&c);
+        assert_eq!(all.as_array().unwrap().len(), 2);
+        assert_eq!(
+            (all[1]["title"].as_str(), all[1]["url"].as_str()),
+            (Some("Doc: docs/user guide.md"), Some("https://git.example.org/lab/app/src/branch/main/docs/user%20guide.md"))
+        );
     }
 
     #[test]

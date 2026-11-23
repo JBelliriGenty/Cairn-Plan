@@ -100,12 +100,15 @@ an owner of a project, nor a member of `admin_groups`: it could then
 approve its own work.
 
 Tools: `list_projects`, `list_tickets` (approved tickets by default),
+`search_tickets` (by a text in the id, title, description or comments),
 `get_ticket` (with who approved it, when, and the edits of its text
 since), `take_ticket`, `wait_ticket` (a question: the ticket waits),
 `comment_ticket`, `add_link`, `finish_ticket` (with the minutes worked),
 `propose_ticket`, `ask_owner` (a question to a project owner: a ticket
 created "waiting" and assigned to them; it shows first in their « For me »
 page, where they answer and move it to "done" or "todo"),
+`close_question` (closes a question this account asked with `ask_owner`,
+while it still waits: report as a comment, then "done"),
 `create_subticket` (splits a ticket this account took into sub-tickets of
 the same project, with a role each).
 

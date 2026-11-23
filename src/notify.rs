@@ -168,9 +168,30 @@ fn push(n: &Ntfy, topic: &str, title: &str, text: &str, link: &str) -> Result<()
     req.send_string(&body.to_string()).map(|_| ()).map_err(|e| e.to_string())
 }
 
-/// Sends what is waiting. A failure is written to the log and not tried
-/// again: the notice stays in the page.
-pub fn send(out: &Outside, waiting: &[Notice]) {
+/// An e-mail ready to leave: kept by the caller when it could not be sent,
+/// to try it again (`resend`).
+pub struct Letter {
+    pub login: String,
+    pub ticket: String,
+    to: String,
+    subject: String,
+    body: String,
+    page: String,
+    settings: String,
+}
+
+/// Tries a letter again. No SMTP server any more: nothing to do.
+pub fn resend(out: &Outside, l: &Letter) -> Result<(), String> {
+    match &out.smtp {
+        Some(smtp) => mail(smtp, &l.to, &l.subject, l.body.clone(), l.page.clone(), &l.settings),
+        None => Ok(()),
+    }
+}
+
+/// Sends what is waiting. A failure is written to the log; the e-mails that
+/// did not leave are returned, to be tried again. A push is not tried again.
+pub fn send(out: &Outside, waiting: &[Notice]) -> Vec<Letter> {
+    let mut failed = Vec::new();
     for (n, subject, text, link) in messages(out, waiting) {
         if let (Some(smtp), true, false) = (&out.smtp, n.mail, n.email.is_empty()) {
             let footer = if out.lang == "fr" {
@@ -181,8 +202,9 @@ pub fn send(out: &Outside, waiting: &[Notice]) {
             let body = format!("{text}\n\n{link}\n\n-- \n{footer}\n");
             let page = html(&out.lang, &n.ticket, &text, &link, footer);
             let settings = if out.public_url.is_empty() { String::new() } else { format!("{}/#/n", out.public_url) };
-            if let Err(e) = mail(smtp, &n.email, &subject, body, page, &settings) {
+            if let Err(e) = mail(smtp, &n.email, &subject, body.clone(), page.clone(), &settings) {
                 eprintln!("notify {}: e-mail about {} not sent: {e}", n.login, n.ticket);
+                failed.push(Letter { login: n.login.clone(), ticket: n.ticket.clone(), to: n.email.clone(), subject: subject.clone(), body, page, settings });
             }
         }
         // the topic the person chose, else the one the configuration file gives them
@@ -193,6 +215,7 @@ pub fn send(out: &Outside, waiting: &[Notice]) {
             }
         }
     }
+    failed
 }
 
 /// One message sent right away to the administrator who asks, to check the

@@ -154,7 +154,45 @@ impl Config {
     }
 }
 
+/// The value of `key` in a query string ("q=a%20b&project=SHOP"); none: empty.
+fn param(query: &str, key: &str) -> String {
+    query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == key).map(|(_, v)| percent_decode(v)).unwrap_or_default()
+}
+
 static DB: OnceLock<Mutex<rusqlite::Connection>> = OnceLock::new();
+
+/// Seconds to wait after the first and the second failure of a send; the
+/// third failure is the last.
+const WAITS: [u64; 2] = [60, 300];
+
+/// Sends that failed (an e-mail, a call to the agent), kept to be tried again.
+/// ponytail: in memory, lost on a restart. The agent catches up on its own
+/// within the hour and a notice stays in the page; a table if that is not enough.
+struct Again<T>(Vec<(T, usize, std::time::Instant)>);
+
+impl<T> Again<T> {
+    fn new() -> Self {
+        Again(Vec::new())
+    }
+    /// Keeps what failed `tries` times for its next try, or gives it back:
+    /// given up.
+    fn keep(&mut self, item: T, tries: usize) -> Option<T> {
+        match WAITS.get(tries - 1) {
+            Some(wait) => {
+                self.0.push((item, tries, std::time::Instant::now() + std::time::Duration::from_secs(*wait)));
+                None
+            }
+            None => Some(item),
+        }
+    }
+    /// What is to be tried now, with the tries already made.
+    fn due(&mut self) -> Vec<(T, usize)> {
+        let now = std::time::Instant::now();
+        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.0).into_iter().partition(|(_, _, at)| *at <= now);
+        self.0 = later;
+        due.into_iter().map(|(item, tries, _)| (item, tries)).collect()
+    }
+}
 
 fn header(r: &Request, name: &str) -> String {
     r.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name)).map(|h| h.value.as_str().trim().to_string()).unwrap_or_default()
@@ -693,6 +731,7 @@ fn respond_cached(r: Request, code: u16, body: String, ctype: &str, cache: &str)
 
 fn handle(cfg: &'static Config, mut r: Request) {
     let path = r.url().split('?').next().unwrap_or("").to_string();
+    let query = r.url().split_once('?').map_or(String::new(), |(_, q)| q.to_string());
     if path == "/healthz" {
         return respond(r, 200, "ok".into(), "text/plain");
     }
@@ -770,6 +809,7 @@ fn handle(cfg: &'static Config, mut r: Request) {
         (Method::Get, ["api", "notifications"]) => store::notifications(&c, &who),
         (Method::Post, ["api", "notifications"]) => store::read_notifications(&c, &who, &body),
         (Method::Get, ["api", "mine"]) => store::mine(&c, &who),
+        (Method::Get, ["api", "search"]) => store::search(&c, &who, &param(&query, "q"), &param(&query, "project")),
         (Method::Get, ["api", "projects"]) => store::projects(&c, &who),
         (Method::Post, ["api", "projects"]) => store::create_project(&c, &who, &body),
         (Method::Get, ["api", "projects", key]) => store::project(&c, &who, key),
@@ -782,6 +822,7 @@ fn handle(cfg: &'static Config, mut r: Request) {
         (Method::Post, ["api", "tickets", id, "links"]) => store::link(&c, &who, id, &body),
         (Method::Post, ["api", "tickets", id, "work"]) => store::log_work(&c, &who, id, &body),
         (Method::Post, ["api", "rates"]) => store::set_rate(&c, &who, &body),
+        (Method::Get, ["api", "projects", key, "export"]) => store::export_project(&c, &who, key),
         (Method::Get, ["api", "projects", key, "time"]) => store::time_report(&c, &who, store::Scope::Project(key), &agent_logins(cfg)),
         (Method::Get, ["api", "spaces", name, "time"]) => {
             store::time_report(&c, &who, store::Scope::Space(&percent_decode(name)), &agent_logins(cfg))
@@ -814,6 +855,21 @@ fn main() {
         }
         return;
     }
+    if path == "export" {
+        // cairn-plan export <config.json> <folder>: a consistent copy of the database, the newest kept
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        let [config, dir] = args.as_slice() else {
+            panic!("usage: cairn-plan export <config.json> <folder>");
+        };
+        match store::backup(&store::open(&Config::load(config).db), dir) {
+            Ok(copy) => println!("{copy}"),
+            Err((_, e)) => {
+                eprintln!("export failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if path == "import" {
         // cairn-plan import <config.json> <draft.json> <space> <login>
         let args: Vec<String> = std::env::args().skip(2).collect();
@@ -836,21 +892,46 @@ fn main() {
     std::fs::create_dir_all(&cfg.files).expect("cannot create the folder of attached files");
     std::fs::create_dir_all(&cfg.avatars).expect("cannot create the folder of profile photos");
     // notices waiting to leave the page: e-mail, ntfy (notify.rs)
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_secs(10));
-        // the lock is released before anything goes on the network
-        let (waiting, calls, saved) = {
-            let c = DB.get().expect("database").lock().unwrap_or_else(|e| e.into_inner());
-            (store::outbox(&c), store::hook_outbox(&c), store::settings(&c))
-        };
-        notify::send(&outside(cfg, &saved), &waiting);
-        // tickets an agent may work on (hooks.rs); a failure is written here
-        // and not tried again: the ticket stays "todo" for whoever comes next
-        let (url, secret) = agent_hook(cfg, &saved);
-        for call in calls.iter().filter(|_| !url.is_empty()) {
-            match hooks::send(&url, &secret, call) {
-                Ok(()) => eprintln!("hook out: {} {}", call.event, call.ticket),
-                Err(e) => eprintln!("hook out: {} {} not sent: {e}", call.event, call.ticket),
+    std::thread::spawn(move || {
+        let (mut letters, mut calls_again) = (Again::new(), Again::new());
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            // the lock is released before anything goes on the network
+            let (waiting, calls, saved) = {
+                let c = DB.get().expect("database").lock().unwrap_or_else(|e| e.into_inner());
+                (store::outbox(&c), store::hook_outbox(&c), store::settings(&c))
+            };
+            let out = outside(cfg, &saved);
+            // an e-mail that did not leave is tried again, then given up (Again)
+            let mut failed: Vec<(notify::Letter, usize)> = notify::send(&out, &waiting).into_iter().map(|l| (l, 1)).collect();
+            for (l, tries) in letters.due() {
+                match notify::resend(&out, &l) {
+                    Ok(()) => eprintln!("notify {}: e-mail about {} sent at try {}", l.login, l.ticket, tries + 1),
+                    Err(e) => {
+                        eprintln!("notify {}: e-mail about {} not sent at try {}: {e}", l.login, l.ticket, tries + 1);
+                        failed.push((l, tries + 1));
+                    }
+                }
+            }
+            for (l, tries) in failed {
+                if let Some(l) = letters.keep(l, tries) {
+                    eprintln!("notify {}: e-mail about {} given up after {tries} tries", l.login, l.ticket);
+                }
+            }
+            // tickets an agent may work on (hooks.rs): the same tries; given up, the
+            // ticket stays "todo" for whoever comes next
+            let (url, secret) = agent_hook(cfg, &saved);
+            let fresh = calls.into_iter().filter(|_| !url.is_empty()).map(|call| (call, 0));
+            for (call, tries) in fresh.chain(calls_again.due()).collect::<Vec<_>>() {
+                match hooks::send(&url, &secret, &call) {
+                    Ok(()) => eprintln!("hook out: {} {}", call.event, call.ticket),
+                    Err(e) => {
+                        eprintln!("hook out: {} {} not sent at try {}: {e}", call.event, call.ticket, tries + 1);
+                        if let Some(call) = calls_again.keep(call, tries + 1) {
+                            eprintln!("hook out: {} {} given up after {} tries", call.event, call.ticket, tries + 1);
+                        }
+                    }
+                }
             }
         }
     });
@@ -863,6 +944,20 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_failed_send_is_tried_three_times() {
+        let mut again = super::Again::new();
+        // first and second failure: kept for later, not due yet
+        assert!(again.keep("call", 1).is_none() && again.keep("call", 2).is_none());
+        assert!(again.due().is_empty());
+        // its time has come
+        again.0[0].2 = std::time::Instant::now();
+        assert_eq!(again.due(), [("call", 1)]);
+        assert_eq!(again.0.len(), 1);
+        // third failure: given up
+        assert_eq!(again.keep("call", 3), Some("call"));
+    }
+
     #[test]
     fn file_names_travel_in_addresses_and_headers() {
         assert_eq!(super::percent_decode("Devis%20%C3%A9t%C3%A9.pdf"), "Devis été.pdf");

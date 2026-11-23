@@ -238,9 +238,12 @@ td.actions { text-align: right; }
 .notices strong { font-weight: 400; }
 .notices .unread strong { font-weight: 600; }
 .notices .unread strong::before { content: "● "; color: var(--accent); }
-.notices .excerpt { color: var(--muted); white-space: pre-wrap; }
+.notices .excerpt { color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
 .comment { padding: 0 0 10px; margin-bottom: 10px; border-bottom: 1px solid var(--line); }
-.comment .body, .question .body { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.comment .body, .question .body, .described .body { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.described { display: flex; flex-direction: column; gap: 6px; }
+.described > button { align-self: flex-start; }
 .question { border-left: 3px solid var(--accent); }
 .question .form { margin-top: 12px; }
 /* a command to paste: kept as typed, scrolled sideways, copied by its button */

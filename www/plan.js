@@ -230,6 +230,7 @@ async function nav() {
     // what waits on me, in every space: the count is the questions asked to me
     el("a", { class: "bell", href: "#/m", ...(location.hash.startsWith("#/m") ? { "aria-current": "page" } : {}) },
       t("For me"), asked > 0 && el("span", { class: "pill count" }, String(asked))),
+    el("a", { href: "#/q", ...(location.hash.startsWith("#/q") ? { "aria-current": "page" } : {}) }, t("Search")),
     // the space is always named; a switch only when there is a choice
     spaces.length > 1 ? select(spaces, SPACE, s => s || t("No space"), {
       class: "space-switch", "aria-label": t("Space"),
@@ -308,24 +309,42 @@ async function project(key) {
   if (FILTERS.assignee !== "*" && FILTERS.assignee && !p.members.some(m => m.login === FILTERS.assignee)) FILTERS.assignee = "*";
   const stones = [...new Set(p.tickets.map(k => k.milestone).filter(Boolean))].sort();
   if (FILTERS.milestone !== "*" && FILTERS.milestone && !stones.includes(FILTERS.milestone)) FILTERS.milestone = "*";
+  // a project where no ticket has a priority has no use for that filter
+  const ranked = p.tickets.some(k => k.priority !== "none");
+  if (!ranked) FILTERS.priority = "*";
   const title = el("input", { required: true, maxLength: 200, placeholder: t("Title of the ticket"), "aria-label": t("Title of the ticket") });
+  const about = el("textarea", { rows: 4, maxLength: 20000, "aria-label": t("Description"),
+    placeholder: t("What is needed, for whom, and how we will know it is done.") });
+  // "" : a proposal; "todo": an owner creates and approves in one gesture
+  const add = state => act(async () => {
+    if (!title.reportValidity()) return;
+    const r = await api("api/projects/" + encodeURIComponent(key) + "/tickets", { title: title.value, description: about.value, ...(state && { state }) });
+    location.hash = "#/t/" + r.id;
+  });
   const cell = (label, ...kids) => el("td", { "data-label": t(label) }, kids);
   const prio = k => k.priority !== "none" && el("span", { class: "pill prio-" + k.priority }, t(PRIORITY[k.priority]));
   const agent = k => k.agent && el("span", { class: "pill agent" }, k.agent);
   const tickets = el("div", {}), count = el("span", { class: "label" });
 
-  const table = shown => el("div", { class: "card table-wrap" }, shown.length ? el("table", {},
-    el("thead", {}, el("tr", {}, ["Ticket", "Title", "State", ...(stones.length ? ["Milestone"] : []), "Priority", "Assignee", "Start", "End"].map(h => el("th", {}, t(h))))),
-    el("tbody", {}, shown.map(k => el("tr", {},
-      cell("Ticket", el("a", { href: "#/t/" + k.id }, k.id)),
-      cell("Title", el("a", { href: "#/t/" + k.id }, k.title), k.parent && el("span", { class: "label" }, " · " + k.parent), " ", agent(k), progress(k)),
-      cell("State", pill(k.state)),
-      stones.length > 0 && cell("Milestone", k.milestone),
-      cell("Priority", prio(k)),
-      cell("Assignee", k.assignee && person(k.assignee)),
-      cell("Start", day(k.start_date)),
-      cell("End", day(k.end_date))))))
-    : el("p", { class: "empty" }, t("No ticket here.")));
+  // A column that no ticket shown fills is left out, like the milestone.
+  const table = shown => {
+    const any = f => shown.some(k => k[f] && k[f] !== "none");
+    const cols = { priority: any("priority"), assignee: any("assignee"), start: any("start_date"), end: any("end_date") };
+    const heads = ["Ticket", "Title", "State", stones.length > 0 && "Milestone", cols.priority && "Priority", cols.assignee && "Assignee",
+      cols.start && "Start", cols.end && "End"].filter(Boolean);
+    return el("div", { class: "card table-wrap" }, shown.length ? el("table", {},
+      el("thead", {}, el("tr", {}, heads.map(h => el("th", {}, t(h))))),
+      el("tbody", {}, shown.map(k => el("tr", {},
+        cell("Ticket", el("a", { href: "#/t/" + k.id }, k.id)),
+        cell("Title", el("a", { href: "#/t/" + k.id }, k.title), k.parent && el("span", { class: "label" }, " · " + k.parent), " ", agent(k), progress(k)),
+        cell("State", pill(k.state)),
+        stones.length > 0 && cell("Milestone", k.milestone),
+        cols.priority && cell("Priority", prio(k)),
+        cols.assignee && cell("Assignee", k.assignee && person(k.assignee)),
+        cols.start && cell("Start", day(k.start_date)),
+        cols.end && cell("End", day(k.end_date))))))
+      : el("p", { class: "empty" }, t("No ticket here.")));
+  };
 
   // A card dropped on a column asks for that state; the server says who may.
   const board = found => el("div", { class: "board" },
@@ -387,20 +406,22 @@ async function project(key) {
       stateFilter,
       select(["*", "", ...p.members.map(m => m.login)], FILTERS.assignee, v => v === "*" ? t("Everyone") : v || t("Unassigned"),
         { "aria-label": t("Assignee"), onchange: ev => { FILTERS.assignee = ev.target.value; draw(); } }),
-      select(["*", ...ME.priorities], FILTERS.priority, v => v === "*" ? t("All priorities") : t(PRIORITY[v]),
+      ranked && select(["*", ...ME.priorities], FILTERS.priority, v => v === "*" ? t("All priorities") : t(PRIORITY[v]),
         { "aria-label": t("Priority"), onchange: ev => { FILTERS.priority = ev.target.value; draw(); } }),
       stones.length > 0 && select(["*", "", ...stones], FILTERS.milestone, v => v === "*" ? t("All milestones") : v || t("No milestone"),
         { "aria-label": t("Milestone"), class: "wide-select", onchange: ev => { FILTERS.milestone = ev.target.value; draw(); } }),
       count),
     tickets,
     hint,
-    canEdit && el("form", { class: "card form", onsubmit: act(async () => {
-      const r = await api("api/projects/" + encodeURIComponent(key) + "/tickets", { title: title.value });
-      location.hash = "#/t/" + r.id;
-    }) },
+    canEdit && el("form", { class: "card form", onsubmit: add("") },
       el("h2", {}, t("New ticket")),
-      el("div", { class: "row" }, title, el("button", { class: "primary" }, t("Add the ticket"))),
-      el("small", {}, t("A new ticket starts as a proposal; a project owner approves it."))),
+      title,
+      about,
+      el("div", { class: "row" },
+        isOwner(p.role) && el("button", { type: "button", class: "approve", onclick: add("todo") }, t("Create and approve")),
+        el("button", { class: isOwner(p.role) ? "" : "primary" }, t(isOwner(p.role) ? "Add as a proposal" : "Add the ticket"))),
+      el("small", {}, t(isOwner(p.role) ? "Create and approve: the ticket is ready to be done at once. A proposal waits for your approval."
+        : "A new ticket starts as a proposal; a project owner approves it."))),
   );
   draw();
 }
@@ -422,7 +443,9 @@ async function members(key) {
     el("div", { class: "top" },
       el("div", {}, el("h1", {}, t("Members of {name}", { name: p.name })),
         el("p", { class: "meta" }, t("Reader: reads and comments. Contributor: creates and edits tickets. Owner: approves tickets and manages members."))),
-      el("a", { class: "button", href: "#/p/" + p.key }, t("Back to the project"))),
+      el("div", { class: "row" },
+        el("a", { class: "button", href: "api/projects/" + encodeURIComponent(p.key) + "/export", download: p.key + ".json" }, t("Export")),
+        el("a", { class: "button", href: "#/p/" + p.key }, t("Back to the project")))),
     el("div", { class: "card table-wrap" }, el("table", {},
       el("thead", {}, el("tr", {}, ["Login", "Name", "Role", ""].map(h => el("th", {}, h && t(h))))),
       el("tbody", {}, p.members.map(m => el("tr", {},
@@ -459,23 +482,70 @@ async function members(key) {
 
 /* ---------- for me ---------- */
 
+// How long a ticket has been in its state: what waits longest shows it.
+function since(sec) {
+  const h = Math.floor((Date.now() / 1000 - sec) / 3600);
+  return h < 1 ? t("for less than an hour") : h < 24 ? tp(h, "for {n} hour", "for {n} hours") : tp(Math.floor(h / 24), "for {n} day", "for {n} days");
+}
+
 async function mine() {
   const ks = live("api/mine", await api("api/mine"));
+  // under a question: the last thing someone else said, which may change what is asked
   const row = k => el("li", {},
     el("a", { href: "#/t/" + k.id },
       el("strong", {}, k.id + " · " + k.title),
-      el("span", { class: "label" }, [k.space, k.project_name, t("by {author}", { author: k.author })].filter(Boolean).join(" · "))),
+      el("span", { class: "label" }, [k.space, k.project_name,
+        t("by {author}", { author: k.state === "waiting" && k.assignee !== ME.login ? k.assignee : k.author }), since(k.since)].filter(Boolean).join(" · ")),
+      k.state === "waiting" && k.last.author && k.last.author !== ME.login
+        && el("span", { class: "excerpt clamp" }, t("{author}: {text}", { author: k.last.author, text: k.last.body }))),
     pill(k.state));
   const asked = ks.filter(k => k.state === "waiting"), rest = ks.filter(k => k.state !== "waiting");
   show(
     el("div", { class: "top" }, el("div", {}, el("h1", {}, t("For me")),
-      el("p", { class: "meta" }, t("The open tickets assigned to you, in every space.")))),
+      el("p", { class: "meta" }, t("What waits on you, in every space: the tickets assigned to you and the questions on tickets you approved.")))),
     el("h2", {}, t("Waiting for your answer")),
     el("div", { class: "card" }, asked.length ? el("ul", { class: "list notices" }, asked.map(row))
       : el("p", { class: "empty" }, t("Nothing waits for you."))),
     rest.length > 0 && el("h2", {}, t("Also assigned to you")),
     rest.length > 0 && el("div", { class: "card" }, el("ul", { class: "list notices" }, rest.map(row))),
   );
+}
+
+/* ---------- search ---------- */
+
+// Every ticket of the projects this person sees: id, title, description, comments.
+// The text typed is kept from one visit of the page to the next.
+let QUERY = "";
+async function search() {
+  const box = el("input", { type: "search", value: QUERY, maxLength: 100, placeholder: t("A word, a ticket id, a sentence"), "aria-label": t("Search") });
+  const found = el("div", {});
+  let last = 0;
+  const run = async () => {
+    QUERY = box.value;
+    const mine = ++last;
+    if (QUERY.trim().length < 2) return found.replaceChildren(el("p", { class: "empty" }, t("Type two characters or more.")));
+    let ks;
+    try { ks = await api("api/search?q=" + encodeURIComponent(QUERY.trim())); }
+    catch (e) { return found.replaceChildren(el("p", { class: "note" }, e.message)); }
+    if (mine !== last) return;   // a later search is on its way
+    found.replaceChildren(...[
+      el("div", { class: "card" }, ks.length ? el("ul", { class: "list notices" }, ks.map(k => el("li", {},
+        el("a", { href: "#/t/" + k.id },
+          el("strong", {}, k.id + " · " + k.title),
+          el("span", { class: "label" }, [k.space, k.project_name].filter(Boolean).join(" · ")),
+          k.excerpt && el("span", { class: "excerpt clamp" }, k.excerpt)),
+        pill(k.state)))) : el("p", { class: "empty" }, t("No ticket holds this text."))),
+      ks.length === 50 && el("p", { class: "meta" }, t("The 50 newest are shown: add a word.")),
+    ].filter(Boolean));
+  };
+  let timer;
+  box.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(run, 250); });
+  show(
+    el("div", { class: "top" }, el("div", {}, el("h1", {}, t("Search")),
+      el("p", { class: "meta" }, t("In the tickets of every space you see: id, title, description and comments.")))),
+    box, found);
+  await run();
+  box.focus();
 }
 
 /* ---------- ticket ---------- */
@@ -534,6 +604,25 @@ async function ticket(id) {
   const words = el("textarea", { required: true, rows: 3, maxLength: 10000, placeholder: t("Write a comment") });
   // a question to the person in front: what is asked, then one click to answer
   const asked = tk.state === "waiting" && tk.assignee === ME.login;
+  // what whoever asked wrote after the question: it may change what is asked
+  const news = asked ? tk.comments.filter(c => c.author === tk.author).pop() : null;
+  // a question on a ticket this person approved: it stays with whoever asked, the answer is a comment
+  const approved = tk.events.find(e => (e.field === "state" || e.field === "created") && e.new === "todo");
+  const lastWord = tk.comments[tk.comments.length - 1];
+  // the description reads like a comment (blocks to copy, diagrams); "Edit" opens the field
+  const descField = field("Description", f.description);
+  const descView = el("div", { class: "described" }, el("small", {}, t("Description")), rich(tk.description),
+    !frozen && el("button", { type: "button", class: "quiet", onclick: () => { descView.hidden = true; descField.hidden = false; f.description.focus(); } },
+      t("Edit the description")));
+  descField.hidden = !!tk.description;
+  descView.hidden = !tk.description;
+  // what a forge attached as a document (hooks.rs), apart from the other links
+  const isDoc = l => l.title.startsWith("Doc: ");
+  const linkRow = l => el("li", {},
+    el("a", { href: l.url, target: "_blank", rel: "noopener noreferrer" }, isDoc(l) ? l.title.slice(5) : l.title || l.url),
+    canEdit && el("button", { type: "button", class: "quiet", onclick: act(async () => { await api(path + "/links", { delete: l.id }); await ticket(id); }) }, t("Remove")));
+  const docs = tk.links.filter(isDoc), others = tk.links.filter(l => !isDoc(l));
+  const waits = !asked && tk.state === "waiting" && approved && approved.actor === ME.login && lastWord && lastWord.author !== ME.login;
   const answer = el("textarea", { rows: 3, maxLength: 10000, placeholder: t("Your answer (optional)"), "aria-label": t("Your answer") });
   const reply = state => act(async () => {
     if (answer.value.trim() || !state) await api(path + "/comments", { body: answer.value });   // empty and alone: refused
@@ -549,6 +638,8 @@ async function ticket(id) {
     asked && el("div", { class: "card question" },
       el("h2", {}, t("{author} asks you", { author: tk.author })),
       rich(tk.description),
+      news && el("p", { class: "note" }, t("Update of {date}", { date: stamp(news.at) })),
+      news && rich(news.body),
       el("div", { class: "form" }, answer,
         el("div", { class: "row" },
           el("button", { type: "button", class: "approve", onclick: reply("done") }, t("Done, close it")),
@@ -556,6 +647,12 @@ async function ticket(id) {
           el("button", { type: "button", class: "quiet", onclick: reply("") }, t("Only send the answer"))),
         el("small", {}, t(owner ? "Done: nothing more to do. Carry on: you approve what the ticket says comes next, with your answer."
           : "Done: nothing more to do.")))),
+    waits && el("div", { class: "card question" },
+      el("h2", {}, t("{author} asks you", { author: lastWord.author })),
+      rich(lastWord.body),
+      el("div", { class: "form" }, answer,
+        el("div", { class: "row" }, el("button", { type: "button", class: "approve", onclick: reply("") }, t("Send the answer"))),
+        el("small", {}, t("Your answer is a comment: whoever asked takes the ticket again.")))),
     tk.state === "backlog" && el("p", { class: "note" }, owner
       ? t("Proposal: approve it to mark it as ready to be done.")
       : t("This ticket waits for the approval of a project owner.")),
@@ -563,7 +660,8 @@ async function ticket(id) {
       t("Approved: only a project owner can change its title and description.")),
     el("form", { class: "card form", onsubmit: act(() => save()) },
       field("Title", f.title),
-      field("Description", f.description),
+      descView,
+      descField,
       el("div", { class: "fields" },
         field("State", f.state), field("Priority", f.priority), field("Assignee", f.assignee),
         field("Start", f.start_date), field("End", f.end_date),
@@ -578,11 +676,11 @@ async function ticket(id) {
       el("a", { href: "#/t/" + k.id }, el("strong", {}, k.id + " · " + k.title)),
       el("span", { class: "kmeta" }, k.agent && el("span", { class: "pill agent" }, k.agent),
         k.assignee && el("span", { class: "label" }, person(k.assignee)), pill(k.state)))))),
+    docs.length > 0 && el("h2", {}, t("Documentation")),
+    docs.length > 0 && el("div", { class: "card" }, el("ul", { class: "list" }, docs.map(linkRow))),
     el("h2", {}, t("Links")),
     el("div", { class: "card" },
-      tk.links.length ? el("ul", { class: "list" }, tk.links.map(l => el("li", {},
-        el("a", { href: l.url, target: "_blank", rel: "noopener noreferrer" }, l.title || l.url),
-        canEdit && el("button", { type: "button", class: "quiet", onclick: act(async () => { await api(path + "/links", { delete: l.id }); await ticket(id); }) }, t("Remove")))))
+      others.length ? el("ul", { class: "list" }, others.map(linkRow))
         : el("p", { class: "empty" }, t("No link yet.")),
       canEdit && el("form", { class: "row", onsubmit: act(async () => { await api(path + "/links", { url: url.value, title: label.value }); await ticket(id); }) },
         url, label, el("button", {}, t("Add the link")))),
@@ -693,6 +791,12 @@ async function follow() {
 
 async function notices() {
   const n = await api("api/notifications");
+  // one line per ticket: its newest notice, and how many came before (opening the ticket reads them all)
+  const groups = [];
+  for (const i of n.items) {
+    const g = groups.find(x => x.ticket === i.ticket);
+    if (g) { g.more++; g.read = g.read && i.read; } else groups.push({ ...i, more: 0 });
+  }
   const mail = el("input", { type: "checkbox", checked: !!ME.mail, onchange: act(async ev => {
     await api("api/me", { mail: ev.target.checked });
     ME.mail = ev.target.checked;
@@ -706,11 +810,12 @@ async function notices() {
         el("p", { class: "meta" }, t("What others do on the tickets you created, are assigned to or commented."))),
       n.unread > 0 && el("button", { type: "button", onclick: act(async () => { await api("api/notifications", { read: "all" }); await notices(); await bell(); }) },
         t("Mark all as read"))),
-    el("div", { class: "card" }, n.items.length ? el("ul", { class: "list notices" }, n.items.map(i => el("li", { class: i.read ? "" : "unread" },
+    el("div", { class: "card" }, groups.length ? el("ul", { class: "list notices" }, groups.map(i => el("li", { class: i.read ? "" : "unread" },
       el("a", { href: "#/t/" + i.ticket },
         el("strong", {}, i.ticket + " · " + i.title),
         el("span", {}, said(i)),
-        i.kind === "comment" && el("span", { class: "excerpt" }, i.detail)),
+        i.kind === "comment" && el("span", { class: "excerpt clamp" }, i.detail),
+        i.more > 0 && el("span", { class: "label" }, tp(i.more, "and {n} earlier notice", "and {n} earlier notices"))),
       el("span", { class: "label" }, stamp(i.at)))))
       : el("p", { class: "empty" }, t("Nothing yet."))),
     el("div", { class: "card" }, el("label", { class: "inline" }, mail,
@@ -1095,6 +1200,7 @@ async function route() {
     else if (h[0] === "t" && h[1]) await ticket(h[1]);
     else if (h[0] === "n") await notices();
     else if (h[0] === "m") await mine();
+    else if (h[0] === "q") await search();
     else if (h[0] === "s") await settings();
     else if (h[0] === "u") await profile();
     else return await home();

@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.23.0
+
+- MCP: new tool `close_question` (`id`, `report`). An agent closes a
+  question it asked itself with `ask_owner`: the report is written as a
+  comment and the ticket becomes "done". Refused when the ticket was not
+  opened as a question by this same account, or when it is no longer
+  "waiting". The same rule holds in the store.
+
+## 0.22.0
+
+- New page "Search" (menu, under "For me"): the tickets of every project
+  you see whose id, title, description or comments hold a text, newest
+  first, with the text around the match.
+- MCP: new tool `search_tickets` (`query`, optional `project`), so that an
+  agent finds what was decided or done before.
+- Ticket page: the description reads like a comment (blocks with "Copy",
+  diagrams drawn). "Edit the description" opens the field.
+- Forge webhook: a commit pushed to the main branch that names a ticket and
+  adds or changes a Markdown file attaches that document to the ticket
+  (block "Documentation" of the ticket page). `CHANGELOG.md` is left out.
+- API: `GET /api/search?q=<text>&project=<KEY>`.
+
+## 0.21.0
+
+- New command `cairn-plan export <config.json> <folder>`: a consistent copy
+  of the database, safe while the server runs. The 14 newest copies are
+  kept. Run it every night before your backup.
+- A project in full as JSON: button "Export" of the Members page, or
+  `GET /api/projects/<KEY>/export` (tickets with comments, links, history
+  and time), for any member of the project.
+- An e-mail or a call to the agent that fails is tried again one minute
+  later, then five minutes later, then given up. The log says each try.
+  The tries are kept in memory: a restart forgets them.
+- The image is built only if the page passes a test in a headless browser
+  (`tests/screen.py`: projects, a ticket with a diagram, "For me",
+  notifications, time). On x86-64 only.
+
+## 0.20.0
+
+- "For me" also lists the questions asked on a ticket you approved (the
+  ticket stays assigned to whoever asked), until you answer in a comment.
+  Each line says how long the ticket has been in its state and, for a
+  question, shows the last comment: it may change what is asked.
+- Ticket page: a question on a ticket you approved is shown at the top,
+  with a field to answer. A question assigned to you shows the update its
+  author wrote after it.
+- Notifications: a ticket that starts ("In progress") no longer notifies
+  anyone. The page shows one line per ticket: its newest notice, and how
+  many came before.
+- New ticket: the form takes the description too. A project owner can
+  "Create and approve" in one gesture.
+- List of tickets: a column that no ticket shown fills (priority, assignee,
+  start, end) is left out. The priority filter shows only when a ticket of
+  the project has a priority.
+- API: `GET /api/mine` adds `assignee`, `since` (when the ticket entered
+  its state) and `last` (author and first 300 characters of the last
+  comment).
+
 ## 0.19.0
 
 - Profile photo: new page "My profile" (bottom of the menu). Everyone

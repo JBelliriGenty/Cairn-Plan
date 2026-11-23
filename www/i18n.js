@@ -163,7 +163,24 @@ const DICT = {
     "invalid start_date": "date de début invalide", "invalid end_date": "date de fin invalide",
     // questions asked to an owner, and what waits on me
     "a question goes to a project owner: assign it to one": "une question va à un responsable du projet : assignez-la à l'un d'eux",
-    "For me": "À moi", "The open tickets assigned to you, in every space.": "Les tickets ouverts qui vous sont assignés, dans tous les espaces.",
+    "For me": "À moi",
+    "What waits on you, in every space: the tickets assigned to you and the questions on tickets you approved.":
+      "Ce qui vous attend, dans tous les espaces : les tickets qui vous sont assignés et les questions sur les tickets que vous avez validés.",
+    "for less than an hour": "depuis moins d'une heure", "for {n} hour": "depuis {n} heure", "for {n} hours": "depuis {n} heures",
+    "for {n} day": "depuis {n} jour", "for {n} days": "depuis {n} jours", "{author}: {text}": "{author} : {text}",
+    "Update of {date}": "Mise à jour du {date}", "Send the answer": "Envoyer la réponse",
+    "Your answer is a comment: whoever asked takes the ticket again.": "Votre réponse est un commentaire : la personne qui a demandé reprend le ticket.",
+    "and {n} earlier notice": "et {n} notification plus ancienne", "and {n} earlier notices": "et {n} notifications plus anciennes",
+    "Search": "Recherche", "A word, a ticket id, a sentence": "Un mot, un identifiant de ticket, une phrase",
+    "Type two characters or more.": "Saisissez deux caractères ou plus.", "No ticket holds this text.": "Aucun ticket ne contient ce texte.",
+    "The 50 newest are shown: add a word.": "Les 50 plus récents sont affichés : ajoutez un mot.",
+    "In the tickets of every space you see: id, title, description and comments.":
+      "Dans les tickets de tous vos espaces : identifiant, titre, description et commentaires.",
+    "search for 2 to 100 characters": "cherchez 2 à 100 caractères",
+    "Edit the description": "Modifier la description", "Documentation": "Documentation",
+    "Create and approve": "Créer et valider", "Export": "Exporter", "Add as a proposal": "Ajouter comme proposition",
+    "Create and approve: the ticket is ready to be done at once. A proposal waits for your approval.":
+      "Créer et valider : le ticket est prêt à être fait tout de suite. Une proposition attend votre validation.",
     "Waiting for your answer": "En attente de votre réponse", "Nothing waits for you.": "Rien ne vous attend.",
     "Also assigned to you": "Vous sont aussi assignés", "by {author}": "de {author}",
     "{author} asks you": "{author} vous demande", "Your answer (optional)": "Votre réponse (facultatif)", "Your answer": "Votre réponse",

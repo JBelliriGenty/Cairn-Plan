@@ -135,6 +135,20 @@ its repositories: a pull request or a commit that names a ticket
 merged. One webhook to `/hooks/git`, signed with a shared secret. See
 [docs/configuration.md](docs/configuration.md#forge-webhooks).
 
+## Copies
+
+`cairn-plan export <config.json> <folder>` writes a consistent copy of the
+database in `<folder>`, safe while the server runs, and keeps the 14 newest.
+Run it every night, before your own backup:
+
+```sh
+docker exec cairn-plan cairn-plan export /etc/cairn-plan/config.json /var/lib/cairn-plan/backups
+```
+
+A project owner or member gets a project in full as JSON (tickets,
+comments, links, history, time) with the "Export" button of the Members
+page, or `GET /api/projects/<KEY>/export`.
+
 ## Import a history
 
 `cairn-plan import <config.json> <draft.json> <space> <login>` creates a

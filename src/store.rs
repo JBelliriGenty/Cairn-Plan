@@ -465,6 +465,31 @@ pub fn create_ticket(c: &Connection, a: &Actor, key: &str, v: &Value) -> R<Value
     Ok(json!({ "id": format!("{key}-{n}") }))
 }
 
+/// The author of a question closes it: report as a comment, state "done".
+/// Allowed only on a ticket this account opened already waiting (its first
+/// event, "created" -> "waiting", is by this account) and still "waiting".
+pub fn close_question(c: &Connection, a: &Actor, id: &str, report: &str) -> R<Value> {
+    let (_, rank, tid) = ticket(c, a, id)?;
+    let (state, opened_by): (String, Option<String>) = db(c.query_row(
+        "SELECT t.state, (SELECT actor FROM events WHERE ticket = t.id AND field = 'created' AND new = 'waiting' ORDER BY id LIMIT 1)
+         FROM tickets t WHERE t.id = ?1",
+        params![tid],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ))?;
+    if opened_by.as_deref() != Some(a.login.as_str()) {
+        return denied("only the account that asked this question can close it");
+    }
+    if state != "waiting" {
+        return Err((409, "only a question still in state \"waiting\" can be closed".into()));
+    }
+    if rank < 2 {
+        return denied("readers cannot edit tickets"); // before the comment: no orphan
+    }
+    comment(c, a, id, &json!({"body": report}))?;
+    update_ticket(c, a, id, &json!({"state": "done"}))?;
+    Ok(json!({ "ok": true }))
+}
+
 /// Who approved a ticket last, and the id of that event.
 fn approval_event(c: &Connection, tid: i64) -> R<Option<(String, i64)>> {
     db(c.query_row(
@@ -549,7 +574,10 @@ pub fn update_ticket(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value>
         event(c, tid, &a.login, f, was, new)?;
         match *f {
             "state" => {
-                notify(c, tid, &a.login, "state", new, None)?;
+                // work that starts is not news: the approval, the question and the end are
+                if new != "in_progress" {
+                    notify(c, tid, &a.login, "state", new, None)?;
+                }
                 if new == "todo" {
                     announce(c, tid, "ticket.approved", &a.login)?;
                 }
@@ -577,20 +605,37 @@ pub fn update_ticket(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value>
     Ok(json!({ "changed": changes.len() }))
 }
 
-/// The open tickets assigned to someone, in all their projects and spaces:
-/// first the questions waiting for them, then the newest.
+/// The open tickets that wait on someone, in all their projects and spaces:
+/// those assigned to them, and the questions asked on a ticket they approved
+/// (it stays assigned to whoever asked) until they answer in a comment.
+/// First what waits for an answer, then the newest. "since": when the ticket
+/// entered its state; "last": the last comment, which may change what is asked.
 pub fn mine(c: &Connection, a: &Actor) -> R<Value> {
-    let mut st = db(c.prepare(
-        "SELECT p.key || '-' || t.number, t.title, t.state, t.priority, p.key, p.name, p.space, t.author, t.updated
+    // who approved a ticket last: the answer a waiting ticket waits for is theirs (see comment())
+    let approver =
+        |of: &str| format!("(SELECT actor FROM events WHERE ticket = {of} AND field IN ('state', 'created') AND new = 'todo' ORDER BY id DESC LIMIT 1)");
+    let last = |col: &str| format!("COALESCE((SELECT {col} FROM comments WHERE ticket = t.id ORDER BY id DESC LIMIT 1), '')");
+    let mut st = db(c.prepare(&format!(
+        "SELECT p.key || '-' || t.number, t.title, t.state, t.priority, p.key, p.name, p.space, t.author, t.updated, t.assignee,
+                COALESCE((SELECT MAX(at) FROM events WHERE ticket = t.id AND field IN ('state', 'created') AND new = t.state), t.updated),
+                {}, {}
          FROM tickets t JOIN projects p ON p.id = t.project
-         WHERE t.assignee = ?1 AND t.state NOT IN ('done', 'cancelled')
+         WHERE t.state NOT IN ('done', 'cancelled')
+           AND (t.assignee = ?1 OR (t.state = 'waiting' AND ?1 IN ({}, {}) AND ?1 != {}))
          ORDER BY t.state != 'waiting', t.updated DESC",
-    ))?;
+        last("author"),
+        last("substr(body, 1, 300)"),
+        approver("t.id"),
+        approver("t.parent"),
+        last("author"),
+    )))?;
     let rows = db(st.query_map(params![a.login], |r| {
         Ok(json!({
             "id": r.get::<_, String>(0)?, "title": r.get::<_, String>(1)?, "state": r.get::<_, String>(2)?,
             "priority": r.get::<_, String>(3)?, "project": r.get::<_, String>(4)?, "project_name": r.get::<_, String>(5)?,
             "space": r.get::<_, String>(6)?, "author": r.get::<_, String>(7)?, "updated": r.get::<_, i64>(8)?,
+            "assignee": r.get::<_, String>(9)?, "since": r.get::<_, i64>(10)?,
+            "last": {"author": r.get::<_, String>(11)?, "body": r.get::<_, String>(12)?},
         }))
     }))?;
     Ok(Value::Array(db(rows.collect())?))
@@ -1157,6 +1202,85 @@ pub fn hook_outbox(c: &Connection) -> Vec<Call> {
     calls
 }
 
+/* ---------- search ---------- */
+
+/// The text around the first match of `q` in `text`, on one line.
+fn excerpt(text: &str, q: &str) -> String {
+    let (low, q) = (text.to_lowercase(), q.to_lowercase());
+    let at = low.find(&q).map_or(0, |b| low[..b].chars().count());
+    let from = at.saturating_sub(60);
+    let cut: String = text.chars().skip(from).take(200).map(|ch| if ch.is_whitespace() { ' ' } else { ch }).collect();
+    format!("{}{}", if from > 0 { "…" } else { "" }, cut.trim())
+}
+
+/// The tickets whose id, title, description or comments hold `q`, in the
+/// projects someone sees (`key`: one project only), newest first, 50 at
+/// most. "excerpt": the text around the match when it is not in the title.
+/// ponytail: LIKE over every ticket, blind to case for ASCII only; FTS5 when the base is large.
+pub fn search(c: &Connection, a: &Actor, q: &str, key: &str) -> R<Value> {
+    let q = q.trim();
+    if !(2..=100).contains(&q.chars().count()) {
+        return bad("search for 2 to 100 characters");
+    }
+    // the signs of LIKE are read as themselves
+    let like = format!("%{}%", q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+    let mut st = db(c.prepare(
+        "SELECT p.key || '-' || t.number, t.title, t.state, p.key, p.name, p.space, t.updated,
+                CASE WHEN t.title LIKE ?2 ESCAPE '\\' OR (p.key || '-' || t.number) LIKE ?2 ESCAPE '\\' THEN ''
+                     WHEN t.description LIKE ?2 ESCAPE '\\' THEN t.description
+                     ELSE COALESCE((SELECT body FROM comments WHERE ticket = t.id AND body LIKE ?2 ESCAPE '\\' ORDER BY id DESC LIMIT 1), '') END
+         FROM tickets t JOIN projects p ON p.id = t.project
+         WHERE (?3 OR p.id IN (SELECT project FROM members WHERE login = ?1)) AND (?4 = '' OR p.key = ?4)
+           AND ((p.key || '-' || t.number) LIKE ?2 ESCAPE '\\' OR t.title LIKE ?2 ESCAPE '\\' OR t.description LIKE ?2 ESCAPE '\\'
+                OR EXISTS (SELECT 1 FROM comments WHERE ticket = t.id AND body LIKE ?2 ESCAPE '\\'))
+         ORDER BY t.updated DESC, t.id DESC LIMIT 50",
+    ))?;
+    let rows = db(st.query_map(params![a.login, like, a.admin, key], |r| {
+        let around: String = r.get(7)?;
+        Ok(json!({
+            "id": r.get::<_, String>(0)?, "title": r.get::<_, String>(1)?, "state": r.get::<_, String>(2)?,
+            "project": r.get::<_, String>(3)?, "project_name": r.get::<_, String>(4)?, "space": r.get::<_, String>(5)?,
+            "updated": r.get::<_, i64>(6)?, "excerpt": if around.is_empty() { String::new() } else { excerpt(&around, q) },
+        }))
+    }))?;
+    Ok(Value::Array(db(rows.collect())?))
+}
+
+/* ---------- copies ---------- */
+
+/// How many copies of the database `backup` keeps.
+const COPIES: usize = 14;
+
+/// A consistent copy of the database in `dir` (VACUUM INTO: safe while the
+/// server runs), named by the second it is made. The newest are kept.
+pub fn backup(c: &Connection, dir: &str) -> R<String> {
+    std::fs::create_dir_all(dir).map_err(|e| (500, format!("cannot create {dir}: {e}")))?;
+    let path = format!("{dir}/plan-{}.db", now());
+    db(c.execute("VACUUM INTO ?1", params![path]))?;
+    let mut copies: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("plan-") && n.ends_with(".db")))
+        .collect();
+    copies.sort();
+    for old in copies.iter().rev().skip(COPIES) {
+        let _ = std::fs::remove_file(old);
+    }
+    Ok(path)
+}
+
+/// A project in full, to keep outside the tool: the project and its members,
+/// then every ticket as its page shows it (text, comments, links, history, time).
+pub fn export_project(c: &Connection, a: &Actor, key: &str) -> R<Value> {
+    let mut p = project(c, a, key)?;
+    let ids: Vec<String> = p["tickets"].as_array().into_iter().flatten().filter_map(|k| k["id"].as_str().map(String::from)).collect();
+    let full: Vec<Value> = ids.iter().map(|id| ticket_view(c, a, id)).collect::<R<_>>()?;
+    p["tickets"] = json!(full);
+    Ok(p)
+}
+
 /* ---------- settings ---------- */
 
 /// What an administrator can set on the settings page. These win over the
@@ -1631,6 +1755,108 @@ mod tests {
         // the owner approves: it becomes work again, nothing waits on them
         update_ticket(&c, &jane, "SHOP-1", &json!({"state": "todo"})).unwrap();
         assert_eq!(mine(&c, &lea).unwrap(), json!([]));
+    }
+
+    #[test]
+    fn a_question_on_an_approved_ticket_waits_on_who_approved_it() {
+        let c = setup();
+        let (jane, lea) = (who("jane", true), who("lea", false));
+        let unread = |a: &Actor| notifications(&c, a).unwrap()["unread"].as_i64().unwrap();
+        create_ticket(&c, &jane, "SHOP", &json!({"title": "Build", "state": "todo"})).unwrap();
+        update_ticket(&c, &lea, "SHOP-1", &json!({"state": "in_progress", "assignee": "lea"})).unwrap();
+        // work that starts: nothing waits on the owner, and they are not told
+        assert_eq!((mine(&c, &jane).unwrap(), unread(&jane)), (json!([]), 0));
+        comment(&c, &lea, "SHOP-1", &json!({"body": "Which port?"})).unwrap();
+        update_ticket(&c, &lea, "SHOP-1", &json!({"state": "waiting"})).unwrap();
+        let list = mine(&c, &jane).unwrap();
+        assert_eq!(
+            (list[0]["id"].as_str(), list[0]["assignee"].as_str(), list[0]["last"]["body"].as_str()),
+            (Some("SHOP-1"), Some("lea"), Some("Which port?"))
+        );
+        assert_eq!(unread(&jane), 2);
+        // answered: it waits on whoever asked again
+        comment(&c, &jane, "SHOP-1", &json!({"body": "443"})).unwrap();
+        assert_eq!(mine(&c, &jane).unwrap(), json!([]));
+        assert_eq!(mine(&c, &lea).unwrap()[0]["last"]["author"], "jane");
+    }
+
+    #[test]
+    fn the_author_of_a_question_closes_it() {
+        let c = setup();
+        let (jane, lea) = (who("jane", true), who("lea", false));
+        let q = |a: &Actor, t: &str| create_ticket(&c, a, "SHOP", &json!({"title": t, "state": "waiting", "assignee": "jane"})).unwrap();
+        let id = q(&lea, "Key?")["id"].as_str().unwrap().to_string();
+        // another author is refused, the author is allowed
+        assert_eq!(close_question(&c, &jane, &id, "no").unwrap_err().0, 403);
+        close_question(&c, &lea, &id, "Done without you.").unwrap();
+        let v = ticket_view(&c, &lea, &id).unwrap();
+        assert_eq!((v["state"].as_str(), v["comments"][0]["body"].as_str()), (Some("done"), Some("Done without you.")));
+        // no longer waiting: refused (409), also after the owner moved it on
+        assert_eq!(close_question(&c, &lea, &id, "again").unwrap_err().0, 409);
+        // a ticket that was not opened as a question is refused, even if it waits now
+        create_ticket(&c, &jane, "SHOP", &json!({"title": "Build", "state": "todo"})).unwrap();
+        update_ticket(&c, &lea, "SHOP-2", &json!({"state": "in_progress", "assignee": "lea"})).unwrap();
+        update_ticket(&c, &lea, "SHOP-2", &json!({"state": "waiting"})).unwrap();
+        assert_eq!(close_question(&c, &lea, "SHOP-2", "x").unwrap_err().0, 403);
+        // a reader sees the question but cannot close it
+        let id3 = q(&lea, "Port?")["id"].as_str().unwrap().to_string();
+        assert!(close_question(&c, &who("tom", false), &id3, "x").is_err());
+        assert_eq!(ticket_view(&c, &lea, &id3).unwrap()["state"], "waiting");
+    }
+
+    #[test]
+    fn the_database_and_a_project_are_copied_out() {
+        let c = setup();
+        let (jane, tom) = (who("jane", true), who("tom", false));
+        create_ticket(&c, &jane, "SHOP", &json!({"title": "Build", "description": "All of it"})).unwrap();
+        comment(&c, &jane, "SHOP-1", &json!({"body": "Go"})).unwrap();
+        // a project in full, for any member; nothing for an outsider
+        let out = export_project(&c, &tom, "SHOP").unwrap();
+        assert_eq!((out["tickets"][0]["description"].as_str(), out["tickets"][0]["comments"][0]["body"].as_str()), (Some("All of it"), Some("Go")));
+        assert_eq!(export_project(&c, &who("eve", false), "SHOP").unwrap_err().0, 404);
+        // a copy of the database that opens on its own; the oldest copies go
+        let dir = std::env::temp_dir().join(format!("cairn-plan-copies-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in 0..COPIES + 2 {
+            std::fs::write(dir.join(format!("plan-00000000{n:02}.db")), "old").unwrap();
+        }
+        let path = backup(&c, dir.to_str().unwrap()).unwrap();
+        let copy = Connection::open(&path).unwrap();
+        assert_eq!(copy.query_row("SELECT COUNT(*) FROM tickets", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        let left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(left.len(), COPIES);
+        assert!(!left.contains(&"plan-0000000000.db".to_string()) && left.contains(&"plan-0000000015.db".to_string()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tickets_are_searched_in_the_projects_someone_sees() {
+        let c = setup();
+        let (jane, lea, eve) = (who("jane", true), who("lea", false), who("eve", false));
+        create_project(&c, &jane, &json!({"key": "BLOG", "name": "Blog"})).unwrap();
+        create_ticket(&c, &jane, "SHOP", &json!({"title": "Port of the resolver", "description": "It listens on 853."})).unwrap();
+        create_ticket(&c, &jane, "SHOP", &json!({"title": "Other"})).unwrap();
+        comment(&c, &lea, "SHOP-2", &json!({"body": "We chose the PORT 8443 for 100% of the calls."})).unwrap();
+        create_ticket(&c, &jane, "BLOG", &json!({"title": "Port the app"})).unwrap();
+        let ids = |a: &Actor, q: &str, key: &str| -> Vec<String> {
+            let mut ids: Vec<String> = search(&c, a, q, key).unwrap().as_array().unwrap().iter().map(|k| k["id"].as_str().unwrap().to_string()).collect();
+            ids.sort();
+            ids
+        };
+        // title, description and comments; a member sees their projects only, an outsider nothing
+        assert_eq!(ids(&lea, "port", ""), ["SHOP-1", "SHOP-2"]);
+        assert_eq!(ids(&jane, "port", ""), ["BLOG-1", "SHOP-1", "SHOP-2"]);
+        assert_eq!(ids(&jane, "port", "BLOG"), ["BLOG-1"]);
+        assert_eq!(ids(&lea, "853", ""), ["SHOP-1"]);
+        assert!(ids(&eve, "port", "").is_empty());
+        // the id of a ticket, and the signs of LIKE read as themselves
+        assert_eq!(ids(&lea, "shop-2", ""), ["SHOP-2"]);
+        assert_eq!(ids(&lea, "100%", ""), ["SHOP-2"]);
+        assert!(ids(&lea, "1_0", "").is_empty());
+        let found = search(&c, &lea, "8443", "").unwrap();
+        assert!(found[0]["excerpt"].as_str().unwrap().contains("PORT 8443"));
+        assert_eq!(search(&c, &lea, "p", "").unwrap_err().0, 400);
     }
 
     #[test]

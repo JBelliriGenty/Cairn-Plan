@@ -32,6 +32,10 @@ fn tools() -> Value {
              "project": {"type": "string", "description": "Project key, e.g. SHOP"},
              "state": {"type": "string", "enum": ["todo", "backlog", "in_progress", "waiting", "done", "cancelled", "all"],
                        "description": "Default \"todo\". \"backlog\": proposals not approved yet. \"all\": every ticket of the project."}}}},
+        {"name": "search_tickets", "description": "Tickets whose id, title, description or comments hold a text, in the projects of this account (or in one project), newest first, 50 at most. Use it to find what was decided or done before: an earlier lot, a past answer. \"excerpt\" is the text around the match when it is not in the title.",
+         "inputSchema": {"type": "object", "required": ["query"], "properties": {
+             "query": {"type": "string", "description": "2 to 100 characters, read as they are (no wildcard)"},
+             "project": {"type": "string", "description": "Project key, e.g. SHOP; left out: every project of this account"}}}},
         {"name": "get_ticket", "description": "A ticket in full: text, links, comments, history, and \"approval\" (who moved it to \"todo\", when, and edits of its text since).",
          "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": id}}},
         {"name": "take_ticket", "description": "Start or resume work on an approved ticket: \"todo\", or \"waiting\" when it is assigned to this account, becomes \"in_progress\", assigned to this account (whoever it was assigned to). Refused in any other state.",
@@ -59,6 +63,8 @@ fn tools() -> Value {
              "title": {"type": "string", "description": "One line: this part of the parent"},
              "description": {"type": "string", "description": "What to do, where, and what done looks like"},
              "role": {"type": "string", "description": "Who builds it, a role of this project's agents, e.g. dev or doc"}}}},
+        {"name": "close_question", "description": "Close a question you asked yourself with ask_owner, once you no longer need the answer (done another way, no longer useful): writes the report as a comment, then \"waiting\" becomes \"done\". Refused if this account did not ask it, or if it is no longer \"waiting\".",
+         "inputSchema": {"type": "object", "required": ["id", "report"], "properties": {"id": id, "report": {"type": "string", "description": "Why it is closed: what was done instead, written as the closing comment"}}}},
         {"name": "ask_owner", "description": "Ask a project owner for what only they can do or decide (a secret, an account, a firewall change, a choice): opens a ticket in state \"waiting\", assigned to them, who is notified. They answer in a comment, then move the ticket to \"done\" (nothing more for you) or to \"todo\" (you carry on as the ticket says).",
          "inputSchema": {"type": "object", "required": ["project", "title", "question"], "properties": {
              "project": {"type": "string", "description": "Project key, e.g. SHOP"},
@@ -107,6 +113,7 @@ fn call(c: &Connection, who: &Actor, tool: &str, a: &Value) -> R<Value> {
                 p["tickets"].as_array().map(|t| t.iter().filter(|k| state == "all" || k["state"] == state).collect()).unwrap_or_default();
             Ok(json!({"project": p["key"], "name": p["name"], "space": p["space"], "state": state, "tickets": found}))
         }
+        "search_tickets" => store::search(c, who, arg(a, "query")?, a["project"].as_str().unwrap_or("")),
         "get_ticket" => view(c, who, arg(a, "id")?),
         "take_ticket" => {
             let id = arg(a, "id")?;
@@ -153,6 +160,10 @@ fn call(c: &Connection, who: &Actor, tool: &str, a: &Value) -> R<Value> {
             let sub = json!({"title": arg(a, "title")?, "description": a["description"].as_str().unwrap_or(""),
                              "agent": arg(a, "role")?, "parent": parent, "state": "todo"});
             store::create_ticket(c, who, key, &sub)
+        }
+        "close_question" => {
+            store::close_question(c, who, arg(a, "id")?, arg(a, "report")?)?;
+            view(c, who, arg(a, "id")?)
         }
         "ask_owner" => {
             let key = arg(a, "project")?;
@@ -244,7 +255,7 @@ mod tests {
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
         assert!(handle(&c, &claude, &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).is_none());
         let list = handle(&c, &claude, &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 11);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 13);
         assert_eq!(handle(&c, &claude, &json!({"jsonrpc": "2.0", "id": 3, "method": "nope"})).unwrap()["error"]["code"], -32601);
 
         // it only sees the projects it was added to
@@ -291,6 +302,12 @@ mod tests {
         assert_eq!((t["state"].as_str(), t["assignee"].as_str(), &t["approval"]), (Some("waiting"), Some("jane"), &Value::Null));
         assert!(refused(&c, &claude, "take_ticket", json!({"id": q["id"]})).contains("can be taken"));
         assert!(refused(&c, &claude, "ask_owner", json!({"project": "SHOP", "title": "x", "question": "y", "owner": "claude"})).contains("project owner"));
+        // the author closes its own question; not one asked by someone else, nor one already closed
+        let q2 = ok(&c, &claude, "ask_owner", json!({"project": "SHOP", "title": "Obsolete", "question": "Still needed?"}));
+        assert!(refused(&c, &claude, "close_question", json!({"id": "SHOP-2", "report": "x"})).contains("asked this question"));
+        let closed = ok(&c, &claude, "close_question", json!({"id": q2["id"], "report": "Done another way."}));
+        assert_eq!((closed["state"].as_str(), closed["comments"][0]["body"].as_str()), (Some("done"), Some("Done another way.")));
+        assert!(refused(&c, &claude, "close_question", json!({"id": q2["id"], "report": "again"})).contains("still in state"));
         // answered and moved to "todo" by the owner: approved, Claude carries on
         store::update_ticket(&c, &jane, q["id"].as_str().unwrap(), &json!({"state": "todo"})).unwrap();
         assert_eq!(ok(&c, &claude, "take_ticket", json!({"id": q["id"]}))["state"], "in_progress");
