@@ -172,13 +172,19 @@ const clock = sec => sec < 86400 ? span(Math.max(1, Math.round(sec / 60)))
   : t("{d} d {h} h", { d: Math.floor(sec / 86400), h: Math.floor(sec % 86400 / 3600) });
 const stamp = sec => new Date(sec * 1000).toLocaleString(LOCALE(), { dateStyle: "medium", timeStyle: "short" });
 const pill = state => el("span", { class: "pill " + STATE_CLASS[state] }, t(STATE[state] || state));
-// Who someone is at a glance: initials on a disc, one colour per person; a square for an agent.
-function avatar(login) {
+// Who someone is at a glance: their photo, else their initials on a disc, one colour per
+// person; a square for an agent. ME.photos says who has a photo (login -> version): the
+// page never asks for a photo that does not exist. size: "lg" or "xl" (the profile page).
+function avatar(login, size) {
+  const shape = ((ME.agents || []).includes(login) ? " bot" : "") + (size ? " " + size : "");
   const parts = login.split(/[-._ ]+/).filter(Boolean);
   const text = ((parts[0] || "?")[0] + (parts[1] ? parts[1][0] : (parts[0] || "")[1] || "")).toUpperCase();
   let h = 0;
   for (const ch of login) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return el("span", { class: "avatar a" + (h % 7 + 1) + ((ME.agents || []).includes(login) ? " bot" : ""), "aria-hidden": "true" }, text);
+  const initials = el("span", { class: "avatar a" + (h % 7 + 1) + shape, "aria-hidden": "true" }, text);
+  const version = (ME.photos || {})[login];
+  return version ? el("img", { class: "avatar" + shape, alt: "", loading: "lazy", onerror: ev => ev.target.replaceWith(initials),
+    src: "api/avatars/" + encodeURIComponent(login) + "?v=" + version }) : initials;
 }
 const person = login => el("span", { class: "person" }, avatar(login), login);
 const field = (label, control, hint) => el("label", { class: "field" }, el("span", {}, t(label)), control, hint && el("small", {}, t(hint)));
@@ -639,6 +645,7 @@ async function bell() {
   const here = location.hash.startsWith("#/n");
   if (here) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
   if (location.hash.startsWith("#/s")) $("#settings").setAttribute("aria-current", "page"); else $("#settings").removeAttribute("aria-current");
+  if (location.hash.startsWith("#/u")) $("#me").setAttribute("aria-current", "page"); else $("#me").removeAttribute("aria-current");
   let n;
   try {
     const r = await fetch("api/notifications", { redirect: "manual" });
@@ -718,6 +725,98 @@ async function notices() {
       el("small", {}, ME.ntfy_prefix
         ? t("Choose a topic that starts with {prefix} and subscribe to it in the ntfy app. Empty: no push.", { prefix: ME.ntfy_prefix })
         : t("Choose a topic and subscribe to it in the ntfy app. Empty: no push."))),
+  );
+}
+
+/* ---------- profile ---------- */
+
+// Framing a photo before it is sent: the image under a fixed square, with the disc (or the
+// square of an agent) it will show in. Dragging moves it, the arrow keys too; the slider zooms.
+// Answers that square, 256 pixels wide, as a JPEG; null when the person gives up. Drawn from
+// the file itself: the page loads no image from an address of its own making.
+async function framed(file, bot) {
+  let img;
+  try { img = await createImageBitmap(file, { imageOrientation: "from-image" }); } catch (e) { throw new Error(t("not an image (PNG, JPEG or WebP)")); }
+  const N = 256, base = Math.min(img.width, img.height);
+  let zoom = 1, cx = img.width / 2, cy = img.height / 2, last = null;
+  const view = el("canvas", { width: N, height: N, tabIndex: 0, "aria-label": t("Photo: drag it or use the arrow keys to place it") });
+  const draw = () => {
+    const side = base / zoom, g = view.getContext("2d");
+    cx = Math.min(img.width - side / 2, Math.max(side / 2, cx));   // the square never leaves the image
+    cy = Math.min(img.height - side / 2, Math.max(side / 2, cy));
+    g.fillStyle = "#fff";   // a JPEG has no transparency
+    g.fillRect(0, 0, N, N);
+    g.imageSmoothingQuality = "high";
+    g.drawImage(img, cx - side / 2, cy - side / 2, side, side, 0, 0, N, N);
+  };
+  // the image follows the pointer: screen pixels, turned into pixels of the image
+  const move = (dx, dy) => { const k = base / zoom / (view.clientWidth || N); cx -= dx * k; cy -= dy * k; draw(); };
+  view.addEventListener("pointerdown", ev => { last = ev; view.setPointerCapture(ev.pointerId); });
+  view.addEventListener("pointermove", ev => { if (last) { move(ev.clientX - last.clientX, ev.clientY - last.clientY); last = ev; } });
+  for (const end of ["pointerup", "pointercancel"]) view.addEventListener(end, () => { last = null; });
+  view.addEventListener("keydown", ev => {
+    const step = { ArrowLeft: [-16, 0], ArrowRight: [16, 0], ArrowUp: [0, -16], ArrowDown: [0, 16] }[ev.key];
+    if (step) { ev.preventDefault(); move(...step); }
+  });
+  const slider = el("input", { type: "range", min: 1, max: 4, step: 0.01, value: 1, oninput: ev => { zoom = Number(ev.target.value); draw(); } });
+  draw();
+  return new Promise(done => {
+    const box = el("dialog", { class: "cropper", onclose: () => { box.remove(); done(null); } },
+      el("h2", {}, t("Frame the photo")),
+      el("p", { class: "meta" }, t("Drag the photo to place it. The slider zooms in.")),
+      el("div", { class: "frame" + (bot ? " bot" : "") }, view),
+      el("label", { class: "inline" }, t("Zoom"), slider),
+      el("div", { class: "row" },
+        el("button", { type: "button", class: "primary", onclick: () => view.toBlob(blob => { done(blob); box.close(); }, "image/jpeg", 0.9) }, t("Save")),
+        el("button", { type: "button", onclick: () => box.close() }, t("Cancel"))));
+    document.body.append(box);
+    box.showModal();
+  });
+}
+
+// The photo of one account: choose it (framed, then sent) or remove it. choose: false for
+// the account of someone else, whose photo an administrator can only remove.
+function photoButtons(login, choose = true) {
+  const path = "api/avatars/" + encodeURIComponent(login);
+  const changed = async version => {
+    if (version) ME.photos[login] = version; else delete ME.photos[login];
+    frame();
+    await profile();
+    toast(t("Saved"));
+  };
+  const pick = el("input", { type: "file", accept: "image/png,image/jpeg,image/webp", hidden: true, onchange: act(async ev => {
+    const file = ev.target.files[0];
+    ev.target.value = "";   // the same file can be chosen again
+    const blob = file && await framed(file, (ME.agents || []).includes(login));
+    if (blob) await changed((await upload(path, blob)).photo);
+  }) });
+  return el("div", { class: "row" }, choose && pick,
+    // one main button on the page: mine, while I have no photo
+    choose && el("button", { type: "button", class: login === ME.login && !ME.photos[login] ? "primary" : "", onclick: () => pick.click() },
+      t(ME.photos[login] ? "Change the photo" : "Choose a photo")),
+    ME.photos[login] && el("button", { type: "button", onclick: act(async () => changed((await api(path, { delete: true })).photo)) }, t("Remove the photo")));
+}
+
+// One idea: my photo. An administrator also sets the photo of the agents, which never open
+// the page, and can remove the photo of someone (not choose it).
+async function profile() {
+  ME.photos = (await api("api/me")).photos || {};   // what others changed since the page was opened
+  const agents = ME.admin ? [...new Set(ME.agents || [])].sort() : [];
+  const people = ME.admin ? Object.keys(ME.photos).filter(l => l !== ME.login && !agents.includes(l)).sort() : [];
+  const rows = (logins, choose) => el("ul", { class: "list" },
+    logins.map(l => el("li", {}, el("span", { class: "person" }, avatar(l, "lg"), l), photoButtons(l, choose))));
+  show(
+    el("div", { class: "top" }, el("div", {}, el("h1", {}, t("My profile")),
+      el("p", { class: "meta" }, t("Your photo shows next to your name: tickets, comments, history, Time page.")))),
+    el("div", { class: "card profile" }, avatar(ME.login, "xl"),
+      el("div", {}, el("strong", {}, ME.name || ME.login), el("p", { class: "meta" }, ME.login), photoButtons(ME.login),
+        el("small", {}, t("PNG, JPEG or WebP. You frame the photo before it is saved.")))),
+    agents.length > 0 && el("div", { class: "card" }, el("h2", {}, t("Agents")),
+      el("p", { class: "meta" }, t("An agent never opens this page: an administrator chooses its photo. It stays a square.")),
+      rows(agents, true)),
+    people.length > 0 && el("div", { class: "card" }, el("h2", {}, t("People")),
+      el("p", { class: "meta" }, t("An administrator can remove the photo of someone. Their initials come back.")),
+      rows(people, false)),
   );
 }
 
@@ -997,6 +1096,7 @@ async function route() {
     else if (h[0] === "n") await notices();
     else if (h[0] === "m") await mine();
     else if (h[0] === "s") await settings();
+    else if (h[0] === "u") await profile();
     else return await home();
     await nav();
   } catch (e) {
@@ -1008,6 +1108,7 @@ async function route() {
 
 function frame() {
   $("#who").textContent = ME.name || ME.login;
+  $("#me").replaceChildren(avatar(ME.login), t("My profile"));
   $("#version").textContent = "Cairn Plan " + ME.version;
   $("#lang").textContent = t("Language: {name}", { name: LANGS[LANG].name });
   $("#settings").textContent = t("Settings");
@@ -1017,6 +1118,7 @@ function frame() {
 addEventListener("hashchange", route);
 addEventListener("DOMContentLoaded", act(async () => {
   ME = await api("api/me");
+  ME.photos ||= {};
   LANG = pickLang(ME.lang);
   document.documentElement.lang = LANG;
   $("#lang").addEventListener("click", () => {

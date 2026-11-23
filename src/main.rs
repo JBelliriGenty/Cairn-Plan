@@ -59,10 +59,14 @@ struct Config {
     agent_hook: (String, String),
     /// Folder of the files attached to tickets: "files", next to the database.
     files: std::path::PathBuf,
+    /// Folder of the profile photos: "avatars", next to the database.
+    avatars: std::path::PathBuf,
 }
 
 /// Largest file that can be attached to a ticket.
 const MAX_FILE: u64 = 25 * 1024 * 1024;
+/// Largest profile photo. The page sends a square of 256 pixels, far smaller.
+const MAX_PHOTO: u64 = 1024 * 1024;
 
 /// The "name:secret" lines of the file named by a configuration key (secret
 /// of 32 characters or more, lines starting with # ignored). The name only
@@ -112,6 +116,7 @@ impl Config {
                 .unwrap_or_default(),
             webhook_secrets: secrets_file(&v, "webhook_secrets_file"),
             files: std::path::Path::new(&s("db", "/var/lib/cairn-plan/plan.db")).with_file_name("files"),
+            avatars: std::path::Path::new(&s("db", "/var/lib/cairn-plan/plan.db")).with_file_name("avatars"),
             agent_hook: (s("agent_hook_url", ""), secret("agent_hook_secret_file")),
             outside: notify::Outside {
                 public_url: s("public_url", "").trim_end_matches('/').to_string(),
@@ -491,6 +496,96 @@ fn serve_file(cfg: &Config, mut r: Request, who: &Actor, id: &str, rest: &[&str]
     }
 }
 
+/// The content type of a profile photo, read from its first bytes: PNG, JPEG
+/// or WebP. None: not one of them (an SVG or an HTML file is never kept).
+fn image_kind(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if data.len() > 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+/// Profile photos, not JSON either: POST api/avatars/<login> with the bytes
+/// of an image sets the photo of an account, POST with {"delete": true}
+/// removes it, GET reads it. Anyone signed in sees the photos; store::set_photo
+/// says who may set one. One file per account, "<login>.img".
+fn serve_avatar(cfg: &Config, mut r: Request, who: &Actor, login: &str) {
+    let fail = |r: Request, code: u16, e: &str| respond(r, code, json!({ "error": e }).to_string(), "application/json");
+    let db = || DB.get().expect("database").lock().unwrap_or_else(|e| e.into_inner());
+    let file = cfg.avatars.join(format!("{login}.img"));
+    let method = r.method().clone();
+    let ctype = header(&r, "Content-Type");
+    match method {
+        Method::Get => {
+            let found = if store::valid_login(login) { std::fs::read(&file).ok() } else { None };
+            let Some((data, kind)) = found.and_then(|data| image_kind(&data).map(|kind| (data, kind))) else {
+                return fail(r, 404, "no such photo");
+            };
+            let h = |k: &str, v: &str| Header::from_bytes(k, v).unwrap();
+            // the address carries the version of the photo (?v=): kept by the browser for good
+            let _ = r.respond(
+                Response::from_data(data)
+                    .with_header(h("Content-Type", kind))
+                    .with_header(h("Cache-Control", "private, max-age=31536000, immutable"))
+                    .with_header(h("X-Content-Type-Options", "nosniff"))
+                    .with_header(h("Referrer-Policy", "no-referrer")),
+            );
+        }
+        Method::Post if ctype.starts_with("application/json") => {
+            let mut raw = String::new();
+            let _ = r.as_reader().take(1000).read_to_string(&mut raw);
+            if serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null)["delete"] != true {
+                return fail(r, 400, "invalid request");
+            }
+            let done = store::set_photo(&db(), who, login, &agent_logins(cfg), false);
+            match done {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&file);
+                    if login != who.login {
+                        eprintln!("photo of {login} removed by {}", who.login);
+                    }
+                    respond(r, 200, json!({ "photo": 0 }).to_string(), "application/json")
+                }
+                Err((code, e)) => fail(r, code, &e),
+            }
+        }
+        // CSRF: same rule as the attached files
+        Method::Post if ctype.starts_with("application/octet-stream") => {
+            if r.body_length().is_some_and(|n| n as u64 > MAX_PHOTO) {
+                return fail(r, 413, "image too large");
+            }
+            let mut data = Vec::new();
+            let _ = r.as_reader().take(MAX_PHOTO + 1).read_to_end(&mut data);
+            if data.len() as u64 > MAX_PHOTO {
+                return fail(r, 413, "image too large");
+            }
+            if image_kind(&data).is_none() {
+                return fail(r, 400, "not an image (PNG, JPEG or WebP)");
+            }
+            let c = db();
+            let agents = agent_logins(cfg);
+            let saved = store::set_photo(&c, who, login, &agents, true).and_then(|version| {
+                std::fs::write(&file, &data).map(|_| version).map_err(|e| {
+                    eprintln!("photo of {login} not saved: {e}");
+                    let _ = store::set_photo(&c, who, login, &agents, false);
+                    (500, "the file could not be saved".to_string())
+                })
+            });
+            drop(c);
+            match saved {
+                Ok(version) => respond(r, 200, json!({ "photo": version }).to_string(), "application/json"),
+                Err((code, e)) => fail(r, code, &e),
+            }
+        }
+        _ => fail(r, 400, "invalid request"),
+    }
+}
+
 /// Where notices go right now: what an administrator saved on the settings
 /// page, and for what was not saved there, the configuration file.
 fn outside(cfg: &Config, saved: &HashMap<String, String>) -> notify::Outside {
@@ -621,6 +716,9 @@ fn handle(cfg: &'static Config, mut r: Request) {
     if let ["api", "tickets", id, "files", rest @ ..] = segs.as_slice() {
         return serve_file(cfg, r, &who, id, rest);
     }
+    if let ["api", "avatars", login] = segs.as_slice() {
+        return serve_avatar(cfg, r, &who, login);
+    }
     let mut body = Value::Null;
     if method == Method::Post {
         // CSRF: a cross-site form cannot send a JSON body without a CORS
@@ -662,7 +760,7 @@ fn handle(cfg: &'static Config, mut r: Request) {
                 "ntfy": outside(cfg, &saved).ntfy.is_some(), "ntfy_topic": store::ntfy_topic(&c, &who.login),
                 "ntfy_prefix": saved.get("ntfy_prefix").map(String::as_str).unwrap_or(""),
                 "version": env!("CARGO_PKG_VERSION"), "states": store::STATES, "priorities": store::PRIORITIES,
-                "agents": agent_logins(cfg),
+                "agents": agent_logins(cfg), "photos": store::photos(&c).unwrap_or_default(),
             }))
         }
         (Method::Post, ["api", "me"]) => store::set_prefs(&c, &who, &body),
@@ -736,6 +834,7 @@ fn main() {
     let cfg: &'static Config = Box::leak(Box::new(Config::load(&path)));
     DB.set(Mutex::new(store::open(&cfg.db))).ok().expect("database opened twice");
     std::fs::create_dir_all(&cfg.files).expect("cannot create the folder of attached files");
+    std::fs::create_dir_all(&cfg.avatars).expect("cannot create the folder of profile photos");
     // notices waiting to leave the page: e-mail, ntfy (notify.rs)
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(10));
@@ -772,6 +871,17 @@ mod tests {
         assert_eq!(super::kind("a.PNG"), ("image/png", "inline"));
         assert_eq!(super::kind("page.html"), ("application/octet-stream", "attachment"));
         assert_eq!(super::kind("drawing.svg"), ("application/octet-stream", "attachment"));
+    }
+
+    #[test]
+    fn a_profile_photo_is_a_png_a_jpeg_or_a_webp() {
+        assert_eq!(super::image_kind(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"), Some("image/png"));
+        assert_eq!(super::image_kind(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 16]), Some("image/jpeg"));
+        assert_eq!(super::image_kind(b"RIFF\x24\0\0\0WEBPVP8 "), Some("image/webp"));
+        // what could run as a page, and what is simply not a photo
+        for other in [&b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>"[..], b"<!DOCTYPE html>", b"GIF89a", b"RIFF\x24\0\0\0WAVEfmt ", b""] {
+            assert_eq!(super::image_kind(other), None);
+        }
     }
 
     #[test]

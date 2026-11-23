@@ -232,9 +232,28 @@ and PDF open in the browser; anything else is downloaded, so that an
 attached HTML or SVG file never runs as a page of your site. A proxy in
 front must let a request body of 25 MB through.
 
+## Profile photos
+
+Everyone chooses a photo on the page "My profile" (bottom of the menu), or
+removes it. Without a photo, the page shows initials on a coloured disc.
+A disc is a person, a square is an agent (an account of `mcp_login` or
+`mcp_accounts`). An agent never signs in to the page: an administrator
+chooses its photo on the same page. An administrator can also remove the
+photo of anyone there (block "People"), but never chooses it; the log says
+`photo of <login> removed by <administrator>`.
+
+- The person frames the photo in a dialog: drag to place it, a slider to
+  zoom. The browser sends that square, 256 pixels wide, as a JPEG.
+- The server accepts a PNG, a JPEG or a WebP of 1 MB at most. It reads the
+  first bytes of the file: an SVG or an HTML file is refused.
+- Photos are kept in a folder `avatars` next to the database, one file per
+  account (`<login>.img`).
+- Anyone signed in sees the photos. `GET /api/me` lists who has one
+  (`photos`), so the page asks for no file that does not exist.
+
 ## Backup
 
 Copy the SQLite file while the service runs with
 `sqlite3 plan.db ".backup plan-backup.db"`, or stop the container and copy
-the file. Copy the `files` folder next to it as well: it holds the
-attached files.
+the file. Copy the `files` and `avatars` folders next to it as well: they
+hold the attached files and the profile photos.

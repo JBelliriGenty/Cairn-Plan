@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.19.0
+
+- Profile photo: new page "My profile" (bottom of the menu). Everyone
+  chooses a photo (PNG, JPEG or WebP) or removes it.
+- Framing: once the file is chosen, a dialog shows the photo under the disc
+  it will fill. Drag the photo (or use the arrow keys) to place it, move
+  the slider to zoom, then save. The page sends that square, 256 pixels
+  wide.
+- The photo replaces the initials wherever a person is shown: tickets,
+  board, comments, history, members, Time page. No photo: the initials, as
+  before. The shape stays: a disc is a person, a square is an agent.
+- An administrator sets the photo of the agents (MCP accounts) on the same
+  page: an agent never signs in to the page.
+- An administrator can remove the photo of anyone (block "People" of the
+  same page), never choose it. The log names who removed whose photo.
+- Photos are kept in a folder `avatars` next to the database, one file per
+  account, 1 MB at most. The server reads the first bytes: anything that is
+  not a PNG, a JPEG or a WebP is refused. Add the folder to your backup.
+- API: `GET /api/me` lists who has a photo (`photos`: login → version), so
+  the page never asks for a photo that does not exist;
+  `GET /api/avatars/<login>`, `POST /api/avatars/<login>` (the bytes of the
+  image, or `{"delete": true}`).
+
 ## 0.18.0
 
 - New page "Time" for each project (button "Time" of the project) and for

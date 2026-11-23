@@ -116,6 +116,21 @@ const DICT = {
     "attached the file {name}": "a joint le fichier {name}", "removed the file {name}": "a retiré le fichier {name}",
     "file too large": "fichier trop lourd", "empty file": "fichier vide", "invalid file name": "nom de fichier invalide",
     "no such file": "pièce jointe introuvable", "the file could not be saved": "le fichier n'a pas pu être enregistré",
+    // profile photo
+    "My profile": "Mon profil", "Choose a photo": "Choisir une photo", "Change the photo": "Changer la photo", "Remove the photo": "Retirer la photo",
+    "Your photo shows next to your name: tickets, comments, history, Time page.":
+      "Votre photo paraît à côté de votre nom : tickets, commentaires, historique, page Temps.",
+    "PNG, JPEG or WebP. You frame the photo before it is saved.": "PNG, JPEG ou WebP. Vous cadrez la photo avant l'enregistrement.",
+    "Frame the photo": "Cadrer la photo", "Drag the photo to place it. The slider zooms in.": "Glissez la photo pour la placer. Le curseur l'agrandit.",
+    "Photo: drag it or use the arrow keys to place it": "Photo : glissez-la ou utilisez les flèches pour la placer",
+    "Zoom": "Zoom", "Cancel": "Annuler",
+    "An administrator can remove the photo of someone. Their initials come back.":
+      "Un administrateur peut retirer la photo d'une personne. Ses initiales reviennent.",
+    "An agent never opens this page: an administrator chooses its photo. It stays a square.":
+      "Un agent n'ouvre jamais cette page : un administrateur choisit sa photo. Elle reste carrée.",
+    "not an image (PNG, JPEG or WebP)": "ce n'est pas une image (PNG, JPEG ou WebP)", "image too large": "image trop lourde",
+    "no such photo": "photo introuvable", "everyone chooses their own photo": "chacun choisit sa propre photo",
+    "only an administrator can set the photo of an agent": "seul un administrateur règle la photo d'un agent",
     // notifications
     "Notifications": "Notifications", "Mark all as read": "Tout marquer comme lu", "Nothing yet.": "Rien pour l'instant.",
     "What others do on the tickets you created, are assigned to or commented.":

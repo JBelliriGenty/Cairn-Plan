@@ -86,6 +86,8 @@ pub fn open(path: &str) -> Connection {
     let _ = c.execute("ALTER TABLE tickets ADD COLUMN parent INTEGER NOT NULL DEFAULT 0", []);
     // 0.18.0: what an hour of someone costs, in cents (0: not set)
     let _ = c.execute("ALTER TABLE users ADD COLUMN rate INTEGER NOT NULL DEFAULT 0", []);
+    // 0.19.0: the version of someone's profile photo (when it was set, in milliseconds; 0: none)
+    let _ = c.execute("ALTER TABLE users ADD COLUMN photo INTEGER NOT NULL DEFAULT 0", []);
     c
 }
 
@@ -224,6 +226,40 @@ pub fn seen(c: &Connection, login: &str, name: &str, email: &str) {
            email = CASE WHEN ?3 != '' THEN ?3 ELSE email END, seen = ?4",
         params![login, name, email, now()],
     );
+}
+
+/// Who has a profile photo: login -> version of the photo. The page shows
+/// initials for everyone else, without asking for a file that does not exist.
+pub fn photos(c: &Connection) -> R<Value> {
+    let mut st = db(c.prepare("SELECT login, photo FROM users WHERE photo > 0"))?;
+    let mut out = serde_json::Map::new();
+    for row in db(st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))))? {
+        let (login, version) = db(row)?;
+        out.insert(login, json!(version));
+    }
+    Ok(Value::Object(out))
+}
+
+/// Notes that an account has a profile photo (on) or none any more, and
+/// answers its version (0: none). Everyone decides for their own account; an
+/// administrator decides for the accounts of the agents, which never sign in
+/// to the page, and can remove the photo of anyone (never choose it). The
+/// file itself is kept by main.rs.
+pub fn set_photo(c: &Connection, a: &Actor, login: &str, agents: &[String], on: bool) -> R<i64> {
+    if !valid_login(login) {
+        return bad("invalid login");
+    }
+    let agent = agents.iter().any(|l| l == login);
+    if login != a.login && !(a.admin && (agent || !on)) {
+        return denied(if agent { "only an administrator can set the photo of an agent" } else { "everyone chooses their own photo" });
+    }
+    let version = if on { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(1) } else { 0 };
+    // an agent that never called yet has no line
+    db(c.execute(
+        "INSERT INTO users(login, seen, photo) VALUES (?1, 0, ?2) ON CONFLICT(login) DO UPDATE SET photo = ?2",
+        params![login, version],
+    ))?;
+    Ok(version)
 }
 
 /* ---------- projects ---------- */
@@ -1794,6 +1830,36 @@ mod tests {
         set_member(&c, &jane, "SHOP", &json!({"login": "lea", "role": "owner"})).unwrap();
         assert_eq!(time_report(&c, &lea, Scope::Project("SHOP"), &agents).unwrap()["rates"]["lea"], 6500);
         assert_eq!(time_report(&c, &lea, Scope::Space("Acme"), &agents).unwrap()["money"], true); // owner of all she sees
+    }
+
+    #[test]
+    fn a_photo_is_set_by_its_owner_or_by_an_administrator_for_an_agent() {
+        let c = setup();
+        let (jane, lea) = (who("jane", true), who("lea", false));
+        let agents = vec!["claude".to_string()];
+        seen(&c, "lea", "Lea", "lea@example.org");
+        assert_eq!(photos(&c).unwrap(), json!({}));
+        let v = set_photo(&c, &lea, "lea", &agents, true).unwrap();
+        assert!(v > 0);
+        assert_eq!(photos(&c).unwrap(), json!({ "lea": v }));
+        // nobody chooses the photo of someone else, not even an administrator
+        assert_eq!(set_photo(&c, &lea, "tom", &agents, true).unwrap_err().0, 403);
+        assert_eq!(set_photo(&c, &jane, "lea", &agents, true).unwrap_err().0, 403);
+        // removing it: an administrator only
+        assert_eq!(set_photo(&c, &lea, "jane", &agents, false).unwrap_err().0, 403);
+        assert_eq!(set_photo(&c, &jane, "lea", &agents, false).unwrap(), 0);
+        assert_eq!(photos(&c).unwrap(), json!({}));
+        let v = set_photo(&c, &lea, "lea", &agents, true).unwrap();
+        assert_eq!(photos(&c).unwrap(), json!({ "lea": v }));
+        // an agent: an administrator only, even before the agent first called
+        assert_eq!(set_photo(&c, &lea, "claude", &agents, true).unwrap_err().0, 403);
+        assert!(set_photo(&c, &jane, "claude", &agents, true).unwrap() > 0);
+        assert_eq!(photos(&c).unwrap().as_object().unwrap().len(), 2);
+        assert_eq!(set_photo(&c, &jane, "../x", &agents, true).unwrap_err().0, 400);
+        // removed: initials again; what is known of the person stays
+        assert_eq!(set_photo(&c, &lea, "lea", &agents, false).unwrap(), 0);
+        assert_eq!(photos(&c).unwrap().as_object().unwrap().keys().collect::<Vec<_>>(), ["claude"]);
+        assert!(wants_mail(&c, "lea"));
     }
 
     #[test]

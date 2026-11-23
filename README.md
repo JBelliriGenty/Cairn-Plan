@@ -101,6 +101,13 @@ the ticket with the report. See [agent/README.md](agent/README.md).
 A ticket can carry files (a screenshot, a PDF, a log), up to 25 MB each.
 See [docs/configuration.md](docs/configuration.md#attached-files).
 
+## Profile photos
+
+Everyone is shown with their initials on a disc, or with the photo they
+chose on the page "My profile". A square is an agent; an administrator
+chooses its photo. See
+[docs/configuration.md](docs/configuration.md#profile-photos).
+
 ## Settings
 
 Once the service runs, an administrator sets the rest from the page: the

@@ -48,6 +48,9 @@ a:hover { text-decoration: underline; }
 .gear:hover { background: var(--track); color: var(--fg); text-decoration: none; }
 .gear[aria-current="page"] { background: color-mix(in srgb, var(--accent) 14%, var(--bg)); color: var(--accent); font-weight: 600; }
 .gear[hidden] { display: none; }
+.me { display: flex; align-items: center; gap: 8px; padding: 6px 8px; margin-left: -8px; border-radius: 8px; color: var(--muted); }
+.me:hover { background: var(--track); color: var(--fg); text-decoration: none; }
+.me[aria-current="page"] { background: color-mix(in srgb, var(--accent) 14%, var(--bg)); color: var(--accent); font-weight: 600; }
 .side-foot { margin-top: auto; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 0 8px; color: var(--muted); }
 main { padding: 24px 24px 40px; min-width: 0; background: var(--panel); margin: 8px 8px 8px 0;
   border: 1px solid var(--line); border-radius: var(--radius-sheet); min-height: calc(100vh - 16px); }
@@ -149,6 +152,27 @@ td .progress { margin-left: 8px; }
   font-size: 10px; font-weight: 600; letter-spacing: .02em; color: var(--fg);
   background: color-mix(in srgb, var(--a) 24%, var(--panel)); box-shadow: inset 0 0 0 1.5px var(--a); }
 .avatar.bot { border-radius: 6px; }
+/* a photo keeps the shape; two larger sizes for the profile page */
+img.avatar { object-fit: cover; background: var(--track); box-shadow: 0 0 0 1px var(--line); }
+.avatar.lg { width: 40px; height: 40px; font-size: 15px; }
+.avatar.xl { width: 96px; height: 96px; font-size: 34px; }
+.avatar.bot.lg { border-radius: 10px; }
+.avatar.bot.xl { border-radius: 22px; }
+.profile { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+.profile strong { font-size: 16px; }
+.profile .row { margin-top: 12px; }
+/* framing a photo: the image in a square, dimmed outside the disc (or the square of an agent) it will show in */
+dialog.cropper { width: min(340px, calc(100vw - 32px)); padding: 20px; border: 1px solid var(--line); border-radius: var(--radius-sheet);
+  background: var(--panel); color: var(--fg); }
+dialog.cropper::backdrop { background: rgb(0 0 0 / .5); }
+.cropper h2 { margin-top: 0; }
+.cropper .inline input { flex: 1; }
+.cropper .row { margin: 16px 0 0; }
+.frame { position: relative; width: 256px; max-width: 100%; aspect-ratio: 1; margin: 14px auto; overflow: hidden; border-radius: 8px; }
+.frame canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+.frame canvas:active { cursor: grabbing; }
+.frame::after { content: ""; position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 0 0 200px rgb(0 0 0 / .55); pointer-events: none; }
+.frame.bot::after { border-radius: 23%; }
 .a1 { --a: var(--c1); } .a2 { --a: var(--c2); } .a3 { --a: var(--c3); } .a4 { --a: var(--c4); } .a5 { --a: var(--c5); } .a6 { --a: var(--c6); } .a7 { --a: var(--c7); }
 
 /* time: one sentence, then one view (colours = the series tokens, text stays in text tokens) */
