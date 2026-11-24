@@ -174,7 +174,7 @@ mod tests {
     #[test]
     fn a_document_written_on_the_main_branch_is_attached() {
         let c = store::open(":memory:");
-        let jane = Actor { login: "jane".into(), admin: true };
+        let jane = Actor { login: "jane".into(), admin: true, agent: false };
         store::create_project(&c, &jane, &json!({"key": "SHOP", "name": "Shop"})).unwrap();
         store::create_ticket(&c, &jane, "SHOP", &json!({"title": "Guide"})).unwrap();
         let push = |branch: &str| {
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn pull_requests_and_commits_are_attached() {
         let c = store::open(":memory:");
-        let jane = Actor { login: "jane".into(), admin: true };
+        let jane = Actor { login: "jane".into(), admin: true, agent: false };
         store::create_project(&c, &jane, &json!({"key": "SHOP", "name": "Shop"})).unwrap();
         store::create_ticket(&c, &jane, "SHOP", &json!({"title": "One"})).unwrap();
         let links = |c: &Connection| store::ticket_view(c, &jane, "SHOP-1").unwrap()["links"].clone();

@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.31.1
+
+- A run reported through an OAuth token (the Claude of a member) is now stored
+  under `<login>·claude`, like what that Claude writes elsewhere: the "Agents"
+  page and the team page show an agent, not the person. A member and their
+  Claude see the runs of their projects as before; a run id of the person and
+  one of their Claude are two runs. Runs already stored keep their login (no
+  schema change); static keys do not change.
+
+## 0.31.0
+
+- A person's Claude (an OAuth access token on `/mcp`) no longer acts with the
+  rights of the person. It is never an administrator, and its role in a
+  project is capped at contributor: it cannot approve a ticket, change the
+  text of an approved one or manage members, even if the person is an owner
+  or in `admin_groups`. Keys in `mcp_keys_file` do not change.
+- What it writes carries the name `<login>·claude` (events, comments, files,
+  notices, calls to the agent webhook), so a reader tells the person from
+  their Claude. Assignees, members, runs and the author of a ticket keep the
+  plain login. The page draws such a name as a square disc, like an agent.
+- A person gets no notice for what their own Claude did, as for what they
+  did themselves: the notice is written under `login·claude`, but the person
+  is left out by login.
+- Time entered through `finish_ticket` (minutes) stays counted on the
+  person's login, at their hourly rate.
+- The role `list_projects` and the project list return, and the money of the
+  time report, follow the same cap.
+
 ## 0.30.0
 
 - Team page: two new drawings, `shield` (a shield with a padlock) and

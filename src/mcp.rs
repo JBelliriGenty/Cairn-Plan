@@ -266,8 +266,8 @@ mod tests {
     #[test]
     fn the_agent_works_on_approved_tickets_only() {
         let c = store::open(":memory:");
-        let jane = Actor { login: "jane".into(), admin: true };
-        let claude = Actor { login: "claude".into(), admin: false };
+        let jane = Actor { login: "jane".into(), admin: true, agent: false };
+        let claude = Actor { login: "claude".into(), admin: false, agent: false };
         store::create_project(&c, &jane, &json!({"key": "SHOP", "name": "Shop", "space": "Initech"})).unwrap();
         store::create_project(&c, &jane, &json!({"key": "BLOG", "name": "Blog"})).unwrap();
         store::set_member(&c, &jane, "SHOP", &json!({"login": "claude", "role": "contributor"})).unwrap();
@@ -339,8 +339,8 @@ mod tests {
     #[test]
     fn an_agent_reports_its_runs() {
         let c = store::open(":memory:");
-        let jane = Actor { login: "jane".into(), admin: true };
-        let claude = Actor { login: "claude".into(), admin: false };
+        let jane = Actor { login: "jane".into(), admin: true, agent: false };
+        let claude = Actor { login: "claude".into(), admin: false, agent: false };
         store::create_project(&c, &jane, &json!({"key": "SHOP", "name": "Shop"})).unwrap();
         store::set_member(&c, &jane, "SHOP", &json!({"login": "claude", "role": "contributor"})).unwrap();
         let start = json!({"run_id": "s1", "agent": "ouvrier", "source": "claude-code", "task": "Clean up", "state": "running", "started": 1000, "ticket": "SHOP-3"});
@@ -349,7 +349,7 @@ mod tests {
         assert_eq!((end["state"].as_str(), end["task"].as_str(), end["cost_usd"].as_f64()), (Some("ok"), Some("Clean up"), Some(0.04)));
         assert!(refused(&c, &claude, "report_run", json!({"run_id": "s2"})).contains("agent is required"));
         // another account with the same run_id never completes or changes this run
-        let other = Actor { login: "other".into(), admin: false };
+        let other = Actor { login: "other".into(), admin: false, agent: false };
         assert!(refused(&c, &other, "report_run", json!({"run_id": "s1", "state": "failed"})).contains("is required"));
         assert_eq!(store::runs(&c, &jane, "", "", "").unwrap()[0]["state"], "ok");
     }

@@ -87,7 +87,8 @@ follow-up, which a person then approves or not. With a key, it works as
 one ordinary account, added project by project, that can neither approve
 a ticket nor change the text of an approved one. A client that signs
 people in through OAuth (claude.ai, Claude Cowork) works as the person
-signed in, with their rights. See
+signed in, as that person's Claude: it writes as `login·claude`, is
+capped at contributor and is never an administrator. See
 [docs/configuration.md](docs/configuration.md#mcp-server).
 
 So that the agent does not have to look for work, Cairn Plan calls a

@@ -199,8 +199,8 @@ const pill = state => el("span", { class: "pill " + STATE_CLASS[state] }, t(STAT
 // person; a square for an agent. ME.photos says who has a photo (login -> version): the
 // page never asks for a photo that does not exist. size: "lg" or "xl" (the profile page).
 function avatar(login, size) {
-  const shape = ((ME.agents || []).includes(login) ? " bot" : "") + (size ? " " + size : "");
-  const parts = login.split(/[-._ ]+/).filter(Boolean);
+  const shape = ((ME.agents || []).includes(login) || login.endsWith("·claude") ? " bot" : "") + (size ? " " + size : "");
+  const parts = login.replace(/·claude$/, "").split(/[-._ ]+/).filter(Boolean);
   const text = ((parts[0] || "?")[0] + (parts[1] ? parts[1][0] : (parts[0] || "")[1] || "")).toUpperCase();
   let h = 0;
   for (const ch of login) h = (h * 31 + ch.charCodeAt(0)) >>> 0;

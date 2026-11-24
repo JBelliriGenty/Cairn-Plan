@@ -151,9 +151,10 @@ cancelled).
 With `oidc_issuer`, a remote MCP client that signs people in itself
 (claude.ai custom connectors, and so Claude Cowork; any client following
 the MCP authorization spec) connects without a key, and every call runs
-as the person who signed in, with their rights: the projects they are a
-member of, their role in each, administrator if they are in
-`admin_groups`. Keys keep working as before.
+as the person who signed in, as that person's Claude: the projects they are
+a member of, with their role capped at contributor, never administrator
+(even in `admin_groups`). What it writes carries the name `<login>·claude`.
+Keys keep working as before.
 
 1. At the provider, register a confidential client (`oidc_client_id`)
    with the redirect URIs of the MCP client (for claude.ai:

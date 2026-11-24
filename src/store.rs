@@ -17,6 +17,16 @@ pub type R<T> = Result<T, (u16, String)>;
 pub struct Actor {
     pub login: String,
     pub admin: bool,
+    /// An OpenID access token: someone's Claude, not the person. Never admin, never above contributor.
+    pub agent: bool,
+}
+
+impl Actor {
+    /// The name written in events, comments and notices: the login, plus "·claude" for someone's Claude.
+    /// Rights and joins (members, assignee, runs) keep `login`.
+    pub fn name(&self) -> String {
+        if self.agent { format!("{}·claude", self.login) } else { self.login.clone() }
+    }
 }
 
 pub const STATES: [&str; 6] = ["backlog", "todo", "in_progress", "waiting", "done", "cancelled"];
@@ -201,7 +211,7 @@ fn access(c: &Connection, a: &Actor, key: &str) -> R<(i64, u8)> {
     let role: Option<String> =
         db(c.query_row("SELECT role FROM members WHERE project = ?1 AND login = ?2", params![id, a.login], |r| r.get(0)).optional())?;
     match role {
-        Some(r) => Ok((id, rank(&r))),
+        Some(r) => Ok((id, if a.agent { rank(&r).min(2) } else { rank(&r) })),
         None => Err((404, "no such project".into())),
     }
 }
@@ -320,7 +330,7 @@ pub fn projects(c: &Connection, a: &Actor) -> R<Value> {
         let role: String = r.get(3)?;
         Ok(json!({
             "key": r.get::<_, String>(0)?, "name": r.get::<_, String>(1)?, "description": r.get::<_, String>(2)?,
-            "role": if a.admin { "admin".to_string() } else { role },
+            "role": if a.admin { "admin".to_string() } else if a.agent && role == "owner" { "contributor".to_string() } else { role },
             "space": r.get::<_, String>(4)?, "open": r.get::<_, i64>(5)?, "total": r.get::<_, i64>(6)?,
         }))
     }))?;
@@ -500,12 +510,12 @@ pub fn create_ticket(c: &Connection, a: &Actor, key: &str, v: &Value) -> R<Value
                 parent.map_or(0, |(id, _)| id), vals[9]],
     ))?;
     let tid = c.last_insert_rowid();
-    event(c, tid, &a.login, "created", "", &vals[2])?;
+    event(c, tid, &a.name(), "created", "", &vals[2])?;
     if vals[2] == "todo" {
-        announce(c, tid, "ticket.approved", &a.login)?;
+        announce(c, tid, "ticket.approved", &a.name())?;
     }
     if !vals[4].is_empty() {
-        notify(c, tid, &a.login, "assigned", "", Some(&vals[4]))?;
+        notify(c, tid, &a.name(), &a.login, "assigned", "", Some(&vals[4]))?;
     }
     Ok(json!({ "id": format!("{key}-{n}") }))
 }
@@ -521,7 +531,7 @@ pub fn close_question(c: &Connection, a: &Actor, id: &str, report: &str) -> R<Va
         params![tid],
         |r| Ok((r.get(0)?, r.get(1)?)),
     ))?;
-    if opened_by.as_deref() != Some(a.login.as_str()) {
+    if opened_by.as_deref() != Some(a.name().as_str()) {
         return denied("only the account that asked this question can close it");
     }
     if state != "waiting" {
@@ -616,21 +626,21 @@ pub fn update_ticket(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value>
     for (f, was, new) in &changes {
         // f comes from FIELDS, never from the request
         db(c.execute(&format!("UPDATE tickets SET {f} = ?1 WHERE id = ?2"), params![new, tid]))?;
-        event(c, tid, &a.login, f, was, new)?;
+        event(c, tid, &a.name(), f, was, new)?;
         match *f {
             "state" => {
                 // work that starts is not news: the approval, the question and the end are
                 if new != "in_progress" {
-                    notify(c, tid, &a.login, "state", new, None)?;
+                    notify(c, tid, &a.name(), &a.login, "state", new, None)?;
                 }
                 if new == "todo" {
-                    announce(c, tid, "ticket.approved", &a.login)?;
+                    announce(c, tid, "ticket.approved", &a.name())?;
                 }
                 // a part closed, by an agent or a person: the part that waited for it may go
                 if new == "done" || new == "cancelled" {
                     let parent: i64 = db(c.query_row("SELECT parent FROM tickets WHERE id = ?1", params![tid], |r| r.get(0)))?;
                     if parent != 0 {
-                        announce(c, tid, "ticket.closed", &a.login)?;
+                        announce(c, tid, "ticket.closed", &a.name())?;
                     }
                 }
                 if new == "cancelled" {
@@ -639,11 +649,11 @@ pub fn update_ticket(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value>
                     let open: Vec<(i64, String)> = db(db(st.query_map(params![tid], |r| Ok((r.get(0)?, r.get(1)?))))?.collect())?;
                     for (kid, was) in open {
                         db(c.execute("UPDATE tickets SET state = 'cancelled' WHERE id = ?1", params![kid]))?;
-                        event(c, kid, &a.login, "state", &was, "cancelled")?;
+                        event(c, kid, &a.name(), "state", &was, "cancelled")?;
                     }
                 }
             }
-            "assignee" if !new.is_empty() => notify(c, tid, &a.login, "assigned", "", Some(new))?,
+            "assignee" if !new.is_empty() => notify(c, tid, &a.name(), &a.login, "assigned", "", Some(new))?,
             _ => {}
         }
     }
@@ -770,9 +780,9 @@ pub fn comment(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value> {
     if body.is_empty() || body.len() > 10_000 {
         return bad("invalid comment");
     }
-    db(c.execute("INSERT INTO comments(ticket, author, body, created) VALUES (?1, ?2, ?3, ?4)", params![tid, a.login, body, now()]))?;
+    db(c.execute("INSERT INTO comments(ticket, author, body, created) VALUES (?1, ?2, ?3, ?4)", params![tid, a.name(), body, now()]))?;
     db(c.execute("UPDATE tickets SET updated = ?1 WHERE id = ?2", params![now(), tid]))?;
-    notify(c, tid, &a.login, "comment", &body, None)?;
+    notify(c, tid, &a.name(), &a.login, "comment", &body, None)?;
     // the answer a waiting ticket waits for is the one of whoever approved it, or approved its
     // parent (a sub-ticket is approved by the lead who cut it, on the parent's approval)
     let (waiting, parent): (bool, i64) =
@@ -781,8 +791,8 @@ pub fn comment(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value> {
     if parent != 0 {
         approvers.push(approval_event(c, parent)?);
     }
-    if waiting && approvers.into_iter().flatten().any(|(by, _)| by == a.login) {
-        announce(c, tid, "ticket.answered", &a.login)?;
+    if waiting && approvers.into_iter().flatten().any(|(by, _)| by == a.name()) {
+        announce(c, tid, "ticket.answered", &a.name())?;
     }
     Ok(json!({ "ok": true }))
 }
@@ -798,7 +808,7 @@ pub fn link(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value> {
             db(c.query_row("SELECT url FROM links WHERE id = ?1 AND ticket = ?2", params![lid, tid], |r| r.get(0)).optional())?;
         let Some(url) = url else { return Err((404, "no such link".into())) };
         db(c.execute("DELETE FROM links WHERE id = ?1", params![lid]))?;
-        event(c, tid, &a.login, "link", &url, "")?;
+        event(c, tid, &a.name(), "link", &url, "")?;
         return Ok(json!({ "ok": true }));
     }
     let (url, title) = (text(v, "url").unwrap_or_default(), text(v, "title").unwrap_or_default());
@@ -806,7 +816,7 @@ pub fn link(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value> {
         return bad("invalid link");
     }
     db(c.execute("INSERT INTO links(ticket, url, title) VALUES (?1, ?2, ?3)", params![tid, url, title]))?;
-    event(c, tid, &a.login, "link", "", &url)?;
+    event(c, tid, &a.name(), "link", "", &url)?;
     Ok(json!({ "ok": true }))
 }
 
@@ -1088,7 +1098,7 @@ pub fn time_report(c: &Connection, a: &Actor, scope: Scope, agents: &[String]) -
             if found.is_empty() {
                 return Err((404, "no such space".into()));
             }
-            money = a.admin || found.iter().all(|(_, _, _, role)| rank(role) >= 3);
+            money = a.admin || (!a.agent && found.iter().all(|(_, _, _, role)| rank(role) >= 3));
             ("space", space.to_string(), space.to_string(), found.into_iter().map(|(id, key, name, _)| (id, key, name)).collect())
         }
     };
@@ -1301,7 +1311,7 @@ pub fn log_work(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value> {
             return denied("only a project owner can remove the time of someone else");
         }
         db(c.execute("DELETE FROM worklogs WHERE id = ?1", params![wid]))?;
-        event(c, tid, &a.login, "work", &minutes.to_string(), "")?;
+        event(c, tid, &a.name(), "work", &minutes.to_string(), "")?;
         return Ok(json!({ "ok": true }));
     }
     let minutes = v["minutes"].as_i64().unwrap_or(0);
@@ -1318,7 +1328,7 @@ pub fn log_work(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value> {
         "INSERT INTO worklogs(ticket, login, minutes, at, note) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![tid, a.login, minutes, at, note],
     ))?;
-    event(c, tid, &a.login, "work", "", &minutes.to_string())?;
+    event(c, tid, &a.name(), "work", "", &minutes.to_string())?;
     Ok(json!({ "ok": true }))
 }
 
@@ -1343,10 +1353,10 @@ pub fn add_file(c: &Connection, a: &Actor, id: &str, name: &str, size: i64) -> R
     }
     db(c.execute(
         "INSERT INTO files(ticket, name, size, author, created) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![tid, name, size, a.login, now()],
+        params![tid, name, size, a.name(), now()],
     ))?;
     let fid = c.last_insert_rowid();
-    event(c, tid, &a.login, "file", "", &name)?;
+    event(c, tid, &a.name(), "file", "", &name)?;
     Ok(fid)
 }
 
@@ -1366,7 +1376,7 @@ pub fn delete_file(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<i64> {
     let Some(fid) = v["delete"].as_i64() else { return bad("invalid request") };
     let name = file(c, a, id, fid)?;
     db(c.execute("DELETE FROM files WHERE id = ?1", params![fid]))?;
-    event(c, tid, &a.login, "file", &name, "")?;
+    event(c, tid, &a.name(), "file", &name, "")?;
     Ok(fid)
 }
 
@@ -1396,7 +1406,8 @@ pub struct Notice {
 /// those who commented) what `actor` did, the actor excepted. `only`: that
 /// person alone (an assignment). People who are no longer members of the
 /// project are left out.
-fn notify(c: &Connection, tid: i64, actor: &str, kind: &str, detail: &str, only: Option<&str>) -> R<()> {
+/// `actor` is the name written; `skip` the login left out (the person, also when it is their Claude who acted).
+fn notify(c: &Connection, tid: i64, actor: &str, skip: &str, kind: &str, detail: &str, only: Option<&str>) -> R<()> {
     let detail: String = detail.chars().take(300).collect();
     db(c.execute(
         "INSERT INTO notifications(login, ticket, actor, kind, detail, at)
@@ -1404,9 +1415,9 @@ fn notify(c: &Connection, tid: i64, actor: &str, kind: &str, detail: &str, only:
            SELECT author AS who FROM tickets WHERE id = ?1
            UNION SELECT assignee FROM tickets WHERE id = ?1
            UNION SELECT author FROM comments WHERE ticket = ?1)
-         WHERE who != '' AND who != ?2 AND (?6 IS NULL OR who = ?6)
+         WHERE who != '' AND who != ?7 AND (?6 IS NULL OR who = ?6)
            AND who IN (SELECT login FROM members WHERE project = (SELECT project FROM tickets WHERE id = ?1))",
-        params![tid, actor, kind, detail, now(), only],
+        params![tid, actor, kind, detail, now(), only, skip],
     ))?;
     Ok(())
 }
@@ -1543,7 +1554,7 @@ pub fn wake(c: &Connection) -> usize {
             continue;
         }
         let _ = event(c, *tid, "cairn-plan", "wake_date", date, "");
-        let _ = notify(c, *tid, "cairn-plan", "wake", "", None);
+        let _ = notify(c, *tid, "cairn-plan", "cairn-plan", "wake", "", None);
         if state == "todo" {
             let _ = announce(c, *tid, "ticket.approved", "cairn-plan");
         }
@@ -1638,7 +1649,7 @@ fn run_text(m: &Value, key: &str, max: usize, required: bool) -> R<String> {
     Ok(s.to_string())
 }
 
-/// An account reports a run of its own. A second report of the same
+/// An account reports a run of its own (a member's Claude is the account "login·claude", not the member). A second report of the same
 /// "run_id" by the same account updates it (what the new report leaves out is
 /// kept); another account's run_id is another run, never touched. Only a summary: never the instruction nor the
 /// output of the agent, which may hold a secret. A run of a project is
@@ -1646,8 +1657,9 @@ fn run_text(m: &Value, key: &str, max: usize, required: bool) -> R<String> {
 /// when it is not given.
 pub fn report_run(c: &Connection, a: &Actor, v: &Value) -> R<Value> {
     let run_id = run_text(v, "run_id", 100, true)?;
+    let owner = a.name(); // someone's Claude reports under "login·claude", an agent in its own right
     let old: Option<Value> =
-        db(c.query_row(&format!("SELECT {RUN_COLS} FROM runs WHERE run_id = ?1 AND login = ?2"), params![run_id, a.login], run_json).optional())?;
+        db(c.query_row(&format!("SELECT {RUN_COLS} FROM runs WHERE run_id = ?1 AND login = ?2"), params![run_id, owner], run_json).optional())?;
     let mut m = old.unwrap_or_else(|| json!({}));
     for k in RUN_FIELDS {
         if !v[k].is_null() {
@@ -1713,9 +1725,9 @@ pub fn report_run(c: &Connection, a: &Actor, v: &Value) -> R<Value> {
                tokens_in=?11, tokens_out=?12, cost_usd=?13, started=?14, ended=?15, parent=?16, result=?17, updated=?18,
                tokens_cache_read=?19, tokens_cache_write=?20"
         ),
-        params![run_id, a.login, agent, source, host, project, ticket, task, state, model, tokens_in, tokens_out, cost, started, ended, parent, result, now(), cache_read, cache_write],
+        params![run_id, owner, agent, source, host, project, ticket, task, state, model, tokens_in, tokens_out, cost, started, ended, parent, result, now(), cache_read, cache_write],
     ))?;
-    db(c.query_row(&format!("SELECT {RUN_COLS} FROM runs WHERE run_id = ?1 AND login = ?2"), params![run_id, a.login], run_json))
+    db(c.query_row(&format!("SELECT {RUN_COLS} FROM runs WHERE run_id = ?1 AND login = ?2"), params![run_id, owner], run_json))
 }
 
 /// The runs someone may see, newest first, 500 at most: those of the
@@ -2103,7 +2115,7 @@ mod tests {
     use super::*;
 
     fn who(login: &str, admin: bool) -> Actor {
-        Actor { login: login.into(), admin }
+        Actor { login: login.into(), admin, agent: false }
     }
 
     /// Project SHOP: jane admin and owner, lea contributor, tom reader, eve outside.
@@ -2435,8 +2447,8 @@ mod tests {
     #[test]
     fn approvals_and_answers_are_announced() {
         let c = open(":memory:");
-        let jane = Actor { login: "jane".into(), admin: true };
-        let claude = Actor { login: "claude".into(), admin: false };
+        let jane = Actor { login: "jane".into(), admin: true, agent: false };
+        let claude = Actor { login: "claude".into(), admin: false, agent: false };
         create_project(&c, &jane, &json!({"key": "SHOP", "name": "Shop"})).unwrap();
         set_member(&c, &jane, "SHOP", &json!({"login": "claude", "role": "contributor"})).unwrap();
         create_ticket(&c, &jane, "SHOP", &json!({"title": "Idea"})).unwrap();
@@ -2757,6 +2769,34 @@ mod tests {
     }
 
     #[test]
+    fn a_run_of_a_members_claude_is_an_agent_of_its_own() {
+        let c = setup();
+        let (jane, lea, eve, key) = (who("jane", true), who("lea", false), who("eve", false), who("claude", false));
+        set_member(&c, &jane, "SHOP", &json!({"login": "claude", "role": "contributor"})).unwrap();
+        let lea_claude = Actor { login: "lea".into(), admin: false, agent: true };
+        // the same run_id by the person, by their Claude and by a static key: three runs
+        for a in [&lea_claude, &lea, &key] {
+            report_run(&c, a, &run("r")).unwrap();
+        }
+        let logins = |a: &Actor| -> Vec<String> {
+            let mut l: Vec<String> = runs(&c, a, "", "", "").unwrap().as_array().unwrap().iter().map(|r| r["login"].as_str().unwrap().to_string()).collect();
+            l.sort();
+            l
+        };
+        assert_eq!(logins(&jane), ["claude", "lea", "lea·claude"]);
+        // the member and their token see the runs of their project; an outsider sees none
+        assert_eq!(logins(&lea), ["claude", "lea", "lea·claude"]);
+        assert_eq!(logins(&lea_claude), ["claude", "lea", "lea·claude"]);
+        assert!(logins(&eve).is_empty());
+        // a second report of the same run_id by the token updates its own run, not the person's
+        let done = report_run(&c, &lea_claude, &json!({"run_id": "r", "state": "ok"})).unwrap();
+        assert_eq!((done["login"].as_str(), done["state"].as_str()), (Some("lea·claude"), Some("ok")));
+        let all = runs(&c, &jane, "", "", "").unwrap();
+        let state = |l: &str| all.as_array().unwrap().iter().find(|r| r["login"] == l).unwrap()["state"].clone();
+        assert_eq!((state("lea"), state("claude"), state("lea·claude")), (json!("running"), json!("running"), json!("ok")));
+    }
+
+    #[test]
     fn a_run_is_checked() {
         let c = setup();
         let lea = who("lea", false);
@@ -2995,5 +3035,77 @@ mod tests {
         assert_eq!((count(&c, "runs"), count(&c, "runs_before_0_27_1")), (2, 1));
         drop(c);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_members_claude_acts_under_their_name_capped_at_contributor() {
+        let c = setup();
+        let (jane, lea, key) = (who("jane", true), who("lea", false), who("claude", false));
+        set_member(&c, &jane, "SHOP", &json!({"login": "max", "role": "owner"})).unwrap();
+        set_member(&c, &jane, "SHOP", &json!({"login": "claude", "role": "contributor"})).unwrap();
+        let oauth = |login: &str, admin: bool| Actor { login: login.into(), admin, agent: true };
+        let (max, lea_claude, boss_claude) = (oauth("max", false), oauth("lea", false), oauth("jane", false));
+        assert_eq!((max.name().as_str(), lea.name().as_str(), key.name().as_str()), ("max·claude", "lea", "claude"));
+
+        // an owner through a token is a contributor: no approval, no members
+        create_ticket(&c, &max, "SHOP", &json!({"title": "Idea"})).unwrap();
+        assert!(update_ticket(&c, &max, "SHOP-1", &json!({"state": "todo"})).is_err());
+        assert!(create_ticket(&c, &max, "SHOP", &json!({"title": "Born approved", "state": "todo"})).is_err());
+        assert!(set_member(&c, &max, "SHOP", &json!({"login": "tom", "role": "owner"})).is_err());
+        // the same person in person still can
+        update_ticket(&c, &who("max", false), "SHOP-1", &json!({"state": "todo"})).unwrap();
+
+        // a member of the administrators group: the token carries no admin right, only the member's role capped
+        assert!(update_ticket(&c, &boss_claude, "SHOP-1", &json!({"state": "backlog", "title": "Changed"})).is_err());
+        assert!(project(&c, &boss_claude, "SHOP").is_ok());
+        assert_eq!(access(&c, &boss_claude, "SHOP").unwrap().1, 2);
+        assert_eq!(access(&c, &jane, "SHOP").unwrap().1, 4);
+
+        // events, comments and notices carry the name; a static key keeps its account name
+        comment(&c, &lea_claude, "SHOP-1", &json!({"body": "From my Claude"})).unwrap();
+        comment(&c, &key, "SHOP-1", &json!({"body": "From the key"})).unwrap();
+        let t = ticket_view(&c, &jane, "SHOP-1").unwrap();
+        assert_eq!((t["comments"][0]["author"].as_str(), t["comments"][1]["author"].as_str()), (Some("lea·claude"), Some("claude")));
+        assert_eq!(t["events"].as_array().unwrap().last().unwrap()["actor"], "max·claude");
+        assert_eq!(t["author"], "max"); // the ticket's author stays an account
+        assert!(notifications(&c, &who("max", false)).unwrap()["items"].to_string().contains("lea·claude"));
+
+        // a question opened through a token is closed by the same token, not by the person
+        let q = create_ticket(&c, &lea_claude, "SHOP", &json!({"title": "Which?", "state": "waiting", "assignee": "jane"})).unwrap();
+        let id = q["id"].as_str().unwrap();
+        assert!(close_question(&c, &lea, id, "no").is_err());
+        close_question(&c, &lea_claude, id, "answered").unwrap();
+    }
+
+    #[test]
+    fn a_claude_token_keeps_its_cap_in_lists_sub_tickets_and_notices() {
+        let c = setup();
+        let jane = who("jane", true);
+        let oauth = |login: &str| Actor { login: login.into(), admin: false, agent: true };
+        set_member(&c, &jane, "SHOP", &json!({"login": "max", "role": "owner"})).unwrap();
+        let (max_claude, lea_claude, max_key) = (oauth("max"), oauth("lea"), who("max", false));
+        // the role shown is the role used: a token reads "contributor", a static key of the same account "owner"
+        assert_eq!(projects(&c, &max_claude).unwrap()[0]["role"], "contributor");
+        assert_eq!(projects(&c, &max_key).unwrap()[0]["role"], "owner");
+        assert_eq!(access(&c, &max_key, "SHOP").unwrap().1, 3);
+        set_member(&c, &max_key, "SHOP", &json!({"login": "tom", "role": "reader"})).unwrap();
+        // no money for the token of an owner, as for no administrator
+        assert_eq!(time_report(&c, &max_key, Scope::Project("SHOP"), &[]).unwrap()["money"], true);
+        assert_eq!(time_report(&c, &max_claude, Scope::Project("SHOP"), &[]).unwrap()["money"], false);
+
+        // a token takes an approved ticket and splits it, but neither sleeps it nor approves
+        create_ticket(&c, &jane, "SHOP", &json!({"title": "Parent", "state": "todo"})).unwrap();
+        update_ticket(&c, &lea_claude, "SHOP-1", &json!({"state": "in_progress", "assignee": "lea"})).unwrap();
+        let kid = create_ticket(&c, &lea_claude, "SHOP", &json!({"title": "Part", "state": "todo", "parent": "SHOP-1"})).unwrap();
+        assert_eq!(kid["id"], "SHOP-2");
+        assert!(update_ticket(&c, &lea_claude, "SHOP-2", &json!({"wake_date": "2030-01-01"})).is_err());
+        create_ticket(&c, &lea_claude, "SHOP", &json!({"title": "Idea"})).unwrap();
+        assert!(update_ticket(&c, &lea_claude, "SHOP-3", &json!({"state": "todo"})).is_err());
+
+        // the person is not told about what their own Claude did, only others are
+        let n = |who: &Actor| notifications(&c, who).unwrap().to_string();
+        comment(&c, &lea_claude, "SHOP-1", &json!({"body": "Done a part"})).unwrap();
+        assert!(!n(&who("lea", false)).contains("Done a part"));
+        assert!(n(&jane).contains("lea·claude"));
     }
 }

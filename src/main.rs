@@ -220,7 +220,7 @@ fn actor(cfg: &Config, r: &Request) -> Option<(Actor, String, String)> {
         return None;
     }
     let admin = in_any(&cfg.admin_groups);
-    Some((Actor { login, admin }, header(r, "Remote-Name"), header(r, "Remote-Email")))
+    Some((Actor { login, admin, agent: false }, header(r, "Remote-Name"), header(r, "Remote-Email")))
 }
 
 /// Compares two secrets without stopping at the first difference.
@@ -293,9 +293,9 @@ fn token_owner(cfg: &Config, info: &Value) -> Result<(Actor, String, String), St
     if !cfg.require_groups.is_empty() && !in_any(&cfg.require_groups) {
         return Err(format!("{login} is in none of require_groups"));
     }
-    let admin = in_any(&cfg.admin_groups);
+    // someone's Claude is never an administrator, whatever the person is (see Actor::agent)
     let text = |k: &str| info[k].as_str().unwrap_or("").to_string();
-    Ok((Actor { login, admin }, text("name"), text("email")))
+    Ok((Actor { login, admin: false, agent: true }, text("name"), text("email")))
 }
 
 /// Asks the provider who holds this access token (its userinfo endpoint,
@@ -323,7 +323,7 @@ fn userinfo(issuer: &str, token: &str) -> Result<Value, String> {
 /// MCP endpoint (mcp.rs), no proxy identity: "Authorization: Bearer" holds
 /// either a key of mcp_keys_file (the call runs as the account mcp_accounts
 /// gives the key, mcp_login by default; the key names the client in the log) or an access token from the OpenID provider (the
-/// call runs as the person signed in, with their rights).
+/// call runs as that person's Claude: named "login·claude", at most a contributor, never an administrator).
 fn serve_mcp(cfg: &Config, mut r: Request) {
     if cfg.mcp_keys.is_empty() && cfg.oidc.is_none() {
         return respond(r, 404, "not found".into(), "text/plain");
@@ -333,7 +333,7 @@ fn serve_mcp(cfg: &Config, mut r: Request) {
     let caller = match cfg.mcp_keys.iter().find(|(_, k)| ct_eq(k, key)) {
         Some((client, _)) => {
             let login = cfg.mcp_accounts.get(client).unwrap_or(&cfg.mcp_login).clone();
-            Some((client.clone(), Actor { login, admin: false }, String::new(), String::new()))
+            Some((client.clone(), Actor { login, admin: false, agent: false }, String::new(), String::new()))
         }
         None => match &cfg.oidc {
             Some((issuer, _)) if !key.is_empty() => match userinfo(issuer, key).and_then(|mut info| {
@@ -891,7 +891,7 @@ fn main() {
         let [config, key, login] = args.as_slice() else {
             panic!("usage: cairn-plan member <config.json> <KEY> <login>");
         };
-        let root = Actor { login: "cairn-plan".into(), admin: true };
+        let root = Actor { login: "cairn-plan".into(), admin: true, agent: false };
         match store::set_member(&store::open(&Config::load(config).db), &root, key, &json!({"login": login, "role": "contributor"})) {
             Ok(_) => println!("{login}: contributor of {key}"),
             Err((_, e)) => {
@@ -1062,7 +1062,9 @@ mod tests {
             serde_json::json!({"aud": aud, "preferred_username": "Alice", "groups": groups, "name": "Alice B", "email": "j@example.org"})
         };
         let (who, name, email) = super::token_owner(&cfg, &info(serde_json::json!(["cairn-plan-mcp"]), &["members", "admins"])).unwrap();
-        assert_eq!((who.login.as_str(), who.admin, name.as_str(), email.as_str()), ("alice", true, "Alice B", "j@example.org"));
+        // in an administrator group or not, a token gives neither admin nor more than the agent's cap
+        assert_eq!((who.login.as_str(), who.admin, who.agent, who.name().as_str(), email.as_str()), ("alice", false, true, "alice·claude", "j@example.org"));
+        assert_eq!(name, "Alice B");
         let (who, _, _) = super::token_owner(&cfg, &info(serde_json::json!("cairn-plan-mcp"), &["members"])).unwrap();
         assert!(!who.admin);
         // audience = the resource asked for (RFC 8707), read in the token (Authelia's JWT access tokens)
