@@ -22,7 +22,8 @@ with open(work + "/config.json", "w") as f:
                "team": {"groups": [{"id": "core", "title": "Core team"}],
                         "members": [{"id": "worker", "name": "Worker", "group": "core", "look": "hardhat", "hue": "#e0803a",
                                      "agents": ["ouvrier"], "assignees": ["bob"]},
-                                    {"id": "checker", "name": "Checker", "group": "core", "look": "glasses", "agents": ["controleur"]}]}}, f)
+                                    {"id": "checker", "name": "Checker", "group": "core", "look": "glasses", "agents": ["controleur"]},
+                                    {"id": "privacy", "name": "Privacy", "group": "core", "look": "shield", "agents": ["dpo"]}]}}, f)
 server = subprocess.Popen(["cairn-plan", work + "/config.json"])
 
 
@@ -107,6 +108,7 @@ try:
     report_run(run_id="s2", agent="controleur", source="claude-code", task="Check the shed", state="ok", started=now - 290, ended=now - 250,
                ticket="DEMO-2", result="conforme")
     report_run(run_id="s3", agent="ouvrier", source="claude-code", task="Paint the roof", state="running", started=now - 60)
+    report_run(run_id="s4", agent="dpo", source="claude-code", task="Audit the sign-up form", state="ok", started=now - 200, ended=now - 150)
 
     # route, what the page must show
     pages = [
@@ -124,13 +126,18 @@ try:
         ("#/s", ["Settings", "Currencies", "Value of one dollar", "Price of a million tokens"]),
         ("#/q", ["Search", "Type two characters or more."]),
         ("#/agent", ["Agent", "No agent is set"]),
-        ("team", ["The team", "Core team", "Worker", "Working", "Paint the roof", "Checker", "Resting"]),
-        ("team#worker", ["What it did", "Sweep the shed", "In its queue", "DEMO-1"]),
+        ("team", ["The team", "Core team", "Worker", "Working", "Paint the roof", "Checker", "Resting", "Today: "]),
+        ("team#worker", ["What it did", "Sweep the shed", "In its queue", "DEMO-1"], ["Audit the sign-up form"]),
+        ("team#privacy", ["Privacy", "Audit the sign-up form"], ["Sweep the shed"]),
     ]
     bad = []
-    for route, wanted in pages:
+    for route, wanted, *absent in pages:
         page = dom(route)
-        missing = [w for w in wanted if w not in page]
+        # a member sheet (team#id) is checked in the sheet alone: the feed above lists every member
+        scope = page.split('id="ficheIn"', 1)[-1] if route.startswith("team#") else page
+        missing = [w for w in wanted if w not in scope]
+        # a run of one member must never show on the sheet of another
+        missing += ["(must not show) " + w for w in (absent[0] if absent else []) if w in scope]
         if 'class="banner"' in page:
             missing.append("(the page shows an error)")
         print("%-18s %s" % (route, "ok" if not missing else "MISSING " + ", ".join(missing)))

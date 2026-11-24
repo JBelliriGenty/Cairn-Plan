@@ -294,6 +294,10 @@ td.actions { text-align: right; }
 .diagram { display: flex; justify-content: center; }
 .diagram svg { max-width: 100%; height: auto; }
 
+.lost { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); max-width: min(640px, calc(100vw - 24px)); z-index: 11;
+  background: var(--bg); color: var(--fg); border: 2px solid var(--bad); border-radius: 8px; padding: 10px 16px; box-shadow: 0 4px 16px rgb(0 0 0 / .15); }
+.lost a { font-weight: 600; }
+small.draft { color: var(--muted); font-style: italic; }
 .toast { position: fixed; bottom: 20px; right: 20px; max-width: min(420px, calc(100vw - 40px)); background: var(--fg); color: var(--bg);
   padding: 10px 16px; border-radius: 8px; z-index: 10; }
 

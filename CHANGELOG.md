@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.30.0
+
+- Team page: two new drawings, `shield` (a shield with a padlock) and
+  `scales`. The screen test checks that a run shows on its member's sheet
+  only.
+
+## 0.29.0
+
+- Drafts: what someone types in a ticket (comment, answer to a question,
+  description) and in the description of a new ticket is kept in the browser
+  (`localStorage`, one key per ticket and field) while they type. It comes
+  back when the page is drawn again, with the mark "Draft restored", and is
+  removed once it is sent.
+- A lost sign-in at the proxy no longer reloads the page (that wiped the text
+  being typed). A banner says the session has ended and opens the sign-in in a
+  new tab; back in the tab, the person sends again. The background requests
+  (notifications, the ticket in front) show the banner as soon as the session
+  ends, before anyone presses "Save".
+
+## 0.28.0
+
+- Team page: a line under the title gives the runs of the members since
+  midnight and what they cost ("≈" when part of it is an estimate).
+- A member's `agents` may end with `*`: a prefix, for agents started on
+  demand under many names.
+- Two new drawings: `toolbox` and `binoculars`.
+
+## 0.27.2
+
+- A team's entry in `AGENT_TEAMS` may give a role a `note`: text that only that
+  project's team needs. The agent adds it to the role's text from `team.json`.
+- The texts read by the team agents (`team.json`, MCP tool examples) name no
+  project: examples use `APP`, and the developer role no longer lists parts of
+  one product.
+
 ## 0.27.1
 
 - A run belongs to the account that reports it: its key is the pair

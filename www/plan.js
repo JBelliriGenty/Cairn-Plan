@@ -101,23 +101,46 @@ function rich(text) {
   return out;
 }
 
+// Sign-in lost (session ended at the proxy): the proxy answers with a
+// redirect to its sign-in page, which a background request cannot follow.
+// The page is NOT reloaded: that would wipe what someone is typing. A banner
+// says so and opens the sign-in in a new tab; drafts (below) keep the text.
+const ENDED = "Your session has ended. Your text is kept: sign in again, then send again.";
+function signedIn(r) {
+  const gone = r.type === "opaqueredirect" || r.status === 401;
+  const b = $("#lost");
+  if (gone) b.replaceChildren(el("span", {}, t("Your session has ended. What you typed is kept in this browser.")), " ",
+    el("a", { href: location.pathname, target: "_blank" }, t("Sign in again (new tab)")), " ",
+    el("small", {}, t("then come back to this tab and send again.")));
+  b.hidden = !gone;
+  return !gone;
+}
+
+// What someone types in a ticket is kept in this browser while they type (one
+// key per ticket and field): a lost session, a reload or a closed tab loses
+// nothing. Put back when the page is drawn again, removed once it is sent.
+// A draft keeps the text it started from: if that text changed since (someone
+// else edited the description), the draft is dropped rather than writing over
+// the newer text. A field that cannot be edited drops its draft.
+// Returns the "Draft restored" mark when there was one, else null.
+function draft(box, key) {
+  key = "cairn-plan-draft:" + key;
+  const drawn = box.value;
+  const store = f => { try { return f(localStorage); } catch (e) { return null; } };   // storage blocked or full
+  box.addEventListener("input", () => store(s => box.value === drawn ? s.removeItem(key) : s.setItem(key, JSON.stringify({ from: drawn, text: box.value }))));
+  box.sent = () => store(s => s.removeItem(key));
+  let kept = null;
+  try { kept = JSON.parse(store(s => s.getItem(key))); } catch (e) { /* not a draft */ }
+  if (box.disabled || !kept || kept.from !== drawn || kept.text === drawn) { box.sent(); return null; }
+  box.value = kept.text;
+  return el("small", { class: "draft" }, t("Draft restored"));
+}
+
 async function api(path, body) {
   const r = await fetch(path, body === undefined ? { redirect: "manual" } : {
     redirect: "manual", method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
-  // Sign-in lost (session ended at the proxy): the proxy answers with a
-  // redirect to its sign-in page, which a background request cannot follow.
-  // Reload the page so that the browser itself goes through the sign-in.
-  if (r.type === "opaqueredirect" || r.status === 401) {
-    let last = 0;
-    try { last = Number(sessionStorage.getItem("cairn-plan-reload")) || 0; } catch (e) { /* storage blocked */ }
-    if (Date.now() - last > 15000) {   // never in a loop
-      try { sessionStorage.setItem("cairn-plan-reload", String(Date.now())); } catch (e) { /* storage blocked */ }
-      location.reload();
-      await new Promise(() => {});   // nothing more to do in this page
-    }
-    throw new Error(t("Your session has ended. Reload the page to sign in again."));
-  }
+  if (!signedIn(r)) throw new Error(t(ENDED));
   const j = await r.json().catch(() => ({ error: "request failed" }));
   if (!r.ok) throw new Error(t(j.error || "request failed"));
   return j;
@@ -127,7 +150,7 @@ async function api(path, body) {
 async function upload(path, file) {
   if (file.size > ME.max_file_mb * 1048576) throw new Error(t("file too large"));
   const r = await fetch(path, { redirect: "manual", method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file });
-  if (r.type === "opaqueredirect" || r.status === 401) throw new Error(t("Your session has ended. Reload the page to sign in again."));
+  if (!signedIn(r)) throw new Error(t(ENDED));
   const j = await r.json().catch(() => ({ error: "request failed" }));
   if (!r.ok) throw new Error(t(j.error || "request failed"));
   return j;
@@ -317,10 +340,12 @@ async function project(key) {
   const title = el("input", { required: true, maxLength: 200, placeholder: t("Title of the ticket"), "aria-label": t("Title of the ticket") });
   const about = el("textarea", { rows: 4, maxLength: 20000, "aria-label": t("Description"),
     placeholder: t("What is needed, for whom, and how we will know it is done.") });
+  const aboutMark = draft(about, "new-" + key + ":description");
   // "" : a proposal; "todo": an owner creates and approves in one gesture
   const add = state => act(async () => {
     if (!title.reportValidity()) return;
     const r = await api("api/projects/" + encodeURIComponent(key) + "/tickets", { title: title.value, description: about.value, ...(state && { state }) });
+    about.sent();
     location.hash = "#/t/" + r.id;
   });
   const cell = (label, ...kids) => el("td", { "data-label": t(label) }, kids);
@@ -418,7 +443,7 @@ async function project(key) {
     canEdit && el("form", { class: "card form", onsubmit: add("") },
       el("h2", {}, t("New ticket")),
       title,
-      about,
+      about, aboutMark,
       el("div", { class: "row" },
         isOwner(p.role) && el("button", { type: "button", class: "approve", onclick: add("todo") }, t("Create and approve")),
         el("button", { class: isOwner(p.role) ? "" : "primary" }, t(isOwner(p.role) ? "Add as a proposal" : "Add the ticket"))),
@@ -620,6 +645,7 @@ async function ticket(id) {
     const body = { ...extra };
     for (const [k, c] of Object.entries(f)) if (c.value.trim() !== tk[k] && !(k in body)) body[k] = c.value;
     await api(path, body);
+    f.description.sent();
     await ticket(id);
     toast(t("Saved"));
   };
@@ -631,6 +657,8 @@ async function ticket(id) {
   const picker = el("input", { type: "file", multiple: true, required: true, "aria-label": t("Files") });
   const weight = n => n < 1048576 ? t("{n} kB", { n: Math.max(1, Math.round(n / 1024)) }) : t("{n} MB", { n: (n / 1048576).toFixed(1) });
   const words = el("textarea", { required: true, rows: 3, maxLength: 10000, placeholder: t("Write a comment") });
+  const wordsMark = draft(words, id + ":comment");
+  const descMark = draft(f.description, id + ":description");   // dropped when frozen
   // a question to the person in front: what is asked, then one click to answer
   const asked = tk.state === "waiting" && tk.assignee === ME.login;
   // what whoever asked wrote after the question: it may change what is asked
@@ -639,12 +667,12 @@ async function ticket(id) {
   const approved = tk.events.find(e => (e.field === "state" || e.field === "created") && e.new === "todo");
   const lastWord = tk.comments[tk.comments.length - 1];
   // the description reads like a comment (blocks to copy, diagrams); "Edit" opens the field
-  const descField = field("Description", f.description);
+  const descField = field("Description", [f.description, descMark]);
   const descView = el("div", { class: "described" }, el("small", {}, t("Description")), rich(tk.description),
     !frozen && el("button", { type: "button", class: "quiet", onclick: () => { descView.hidden = true; descField.hidden = false; f.description.focus(); } },
       t("Edit the description")));
-  descField.hidden = !!tk.description;
-  descView.hidden = !tk.description;
+  descField.hidden = !!tk.description && !descMark;   // a draft of it is shown in its field
+  descView.hidden = !descField.hidden;
   // what a forge attached as a document (hooks.rs), apart from the other links
   const isDoc = l => l.title.startsWith("Doc: ");
   const linkRow = l => el("li", {},
@@ -653,8 +681,10 @@ async function ticket(id) {
   const docs = tk.links.filter(isDoc), others = tk.links.filter(l => !isDoc(l));
   const waits = !asked && tk.state === "waiting" && approved && approved.actor === ME.login && lastWord && lastWord.author !== ME.login;
   const answer = el("textarea", { rows: 3, maxLength: 10000, placeholder: t("Your answer (optional)"), "aria-label": t("Your answer") });
+  const answerMark = draft(answer, id + ":answer");
   const reply = state => act(async () => {
     if (answer.value.trim() || !state) await api(path + "/comments", { body: answer.value });   // empty and alone: refused
+    answer.sent(); answer.value = "";   // sent: a later refusal must not send it twice
     if (state) await api(path, { state });
     await route();   // the ticket and the count of the menu
   });
@@ -669,7 +699,7 @@ async function ticket(id) {
       rich(tk.description),
       news && el("p", { class: "note" }, t("Update of {date}", { date: stamp(news.at) })),
       news && rich(news.body),
-      el("div", { class: "form" }, answer,
+      el("div", { class: "form" }, answer, answerMark,
         el("div", { class: "row" },
           el("button", { type: "button", class: "approve", onclick: reply("done") }, t("Done, close it")),
           owner && el("button", { type: "button", onclick: reply("todo") }, t("Answered: carry on")),
@@ -680,7 +710,7 @@ async function ticket(id) {
     waits && el("div", { class: "card question" },
       el("h2", {}, t("{author} asks you", { author: lastWord.author })),
       rich(lastWord.body),
-      el("div", { class: "form" }, answer,
+      el("div", { class: "form" }, answer, answerMark,
         el("div", { class: "row" }, el("button", { type: "button", class: "approve", onclick: reply("") }, t("Send the answer"))),
         el("small", {}, t("Your answer is a comment: whoever asked takes the ticket again.")))),
     tk.state === "backlog" && el("p", { class: "note" }, owner
@@ -751,8 +781,8 @@ async function ticket(id) {
       tk.comments.length ? tk.comments.map(c => el("div", { class: "comment" },
         el("p", { class: "meta" }, person(c.author), " · " + stamp(c.at)), rich(c.body)))
         : el("p", { class: "empty" }, t("No comment yet.")),
-      el("form", { class: "form", onsubmit: act(async () => { await api(path + "/comments", { body: words.value }); await ticket(id); }) },
-        words, el("div", { class: "row" }, el("button", {}, t("Send"))))),
+      el("form", { class: "form", onsubmit: act(async () => { await api(path + "/comments", { body: words.value }); words.sent(); words.value = ""; await ticket(id); }) },
+        words, wordsMark, el("div", { class: "row" }, el("button", {}, t("Send"))))),
     el("h2", {}, t("History")),
     el("div", { class: "card" }, el("ul", { class: "list history" }, tk.events.map(e => el("li", {},
       el("span", {}, person(e.actor), " " + describe(e)), el("span", { class: "label" }, stamp(e.at)))))),
@@ -779,7 +809,7 @@ async function bell() {
   let n;
   try {
     const r = await fetch("api/notifications", { redirect: "manual" });
-    if (!r.ok) return;
+    if (!signedIn(r) || !r.ok) return;
     n = await r.json();
   } catch (e) { return; }
   link.replaceChildren(...[t("Notifications"), n.unread > 0 && el("span", { class: "pill count" }, String(n.unread))].filter(Boolean));
@@ -811,7 +841,7 @@ async function follow() {
   let d;
   try {
     const r = await fetch(l.path, { redirect: "manual" });   // like bell(): a lost session must not reload the page
-    if (!r.ok) return;
+    if (!signedIn(r) || !r.ok) return;
     d = await r.json();
   } catch (e) { return; }
   const busy = $("#view").contains(document.activeElement) && document.activeElement.matches("input, textarea, select");

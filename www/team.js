@@ -43,13 +43,17 @@ const verdict = r => {
   return [/écart|ecart|gap|fail|échec|refus/i.test(r.result) ? "warn" : "ok", r.result];
 };
 
+/** Whether an agent name is one of the member's: exact, or a prefix written "name*". */
+const agentOf = m => agent => (m.agents || []).some(a => a.endsWith("*") ? agent.startsWith(a.slice(0, -1)) : agent === a);
+
 /** Members with their runs, queue and state, from the data read last. */
 function build() {
   M = TEAM.members.map(m => {
-    const agents = new Set(m.agents || []);
-    const runs = RUNS.filter(r => agents.has(r.agent)).sort((a, b) => b.started - a.started);
-    const usd = [...agents].reduce((s, a) => s + (RATES[a] ? RATES[a].usd : 0), 0);
-    const hours = [...agents].reduce((s, a) => s + (RATES[a] ? RATES[a].hours : 0), 0);
+    const mine = agentOf(m);
+    const runs = RUNS.filter(r => mine(r.agent)).sort((a, b) => b.started - a.started);
+    const rated = Object.keys(RATES).filter(mine);
+    const usd = rated.reduce((s, a) => s + RATES[a].usd, 0);
+    const hours = rated.reduce((s, a) => s + RATES[a].hours, 0);
     return {
       ...m, hue: HUE(m.hue), runs,
       cur: runs.filter(r => r.state === "running" && nowS() - r.updated < STALE).map(r => ({ k: rid(r), task: r.task, ticket: r.ticket, since: r.started })),
@@ -113,6 +117,16 @@ const LOOKS = {
     <g transform="rotate(8 90 104)"><rect x="80" y="91" width="21" height="27" rx="2.5" fill="#ffffff" stroke="#cfc8bb" stroke-width="1.4"/><path d="M85 99H96M85 104H96M85 109H92" stroke="#b5ad9f" stroke-width="1.6"/></g>`],
   courier: ["", `<path d="M35 47C37 29 83 29 85 47Z" fill="#2f3b52"/><path d="M58 45C72 42 92 44 97 51C84 51 70 51 58 49Z" fill="#1f2838"/>
     <rect x="68" y="92" width="34" height="27" rx="2" fill="#c99a62"/><path d="M68 101H102" stroke="#a87a43" stroke-width="3"/><path d="M85 113V104M81 108L85 104L89 108" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>`],
+  toolbox: ["", `<path d="M36 46C38 30 82 30 84 46Z" fill="#3b6e8f"/><rect x="34" y="44" width="52" height="5" rx="2.5" fill="#2f5a75"/>
+    <rect x="58" y="90" width="38" height="21" rx="3" fill="#d6453a"/><path d="M69 90V85H85V90" fill="none" stroke="#8f2a22" stroke-width="3"/><path d="M58 98H96" stroke="#8f2a22" stroke-width="2"/>`],
+  binoculars: ["", `<path d="M38 44C40 31 80 31 82 44Z" fill="#6b8f3b"/><path d="M38 44H90" stroke="#55732f" stroke-width="4" stroke-linecap="round"/>
+    <rect x="62" y="86" width="13" height="19" rx="5" fill="#2a2d38"/><rect x="79" y="86" width="13" height="19" rx="5" fill="#2a2d38"/><rect x="73" y="92" width="8" height="6" fill="#2a2d38"/>
+    <circle cx="68.5" cy="103" r="4.5" fill="#9fd1ff"/><circle cx="85.5" cy="103" r="4.5" fill="#9fd1ff"/>`],
+  shield: ["", `<g transform="translate(-12 -3)"><path d="M70 86L90 90V103C90 111 82 117 80 118C78 117 70 111 70 103Z" fill="#e8edf5" stroke="#2f3e52" stroke-width="2.4" stroke-linejoin="round"/>
+    <rect x="75.5" y="99" width="9" height="8" rx="1.5" fill="#2f3e52"/><path d="M77.5 99V96.5A2.5 2.5 0 0 1 82.5 96.5V99" fill="none" stroke="#2f3e52" stroke-width="1.8"/></g>`],
+  scales: ["", `<g transform="translate(-16 -4)"><path d="M88 84V114M80 114H96" stroke="#9a7a1c" stroke-width="3" stroke-linecap="round"/><path d="M72 90H104" stroke="#c9a227" stroke-width="3" stroke-linecap="round"/>
+    <path d="M72 90L67 101M72 90L77 101M104 90L99 101M104 90L109 101" stroke="#9a7a1c" stroke-width="1.2"/>
+    <path d="M65 101H79A7 4 0 0 1 65 101Z" fill="#c9a227"/><path d="M97 101H111A7 4 0 0 1 97 101Z" fill="#c9a227"/></g>`],
   beacon: [`<g class="beam"><path d="M60 8L50 -6H70Z" fill="#ef4444" fill-opacity=".35"/><path d="M44 16L28 8L34 22Z" fill="#ef4444" fill-opacity=".3"/><path d="M76 16L92 8L86 22Z" fill="#ef4444" fill-opacity=".3"/></g>`,
     `<path d="M33 52C33 27 87 27 87 52Z" fill="#e9eef5"/><rect x="29" y="49" width="62" height="6" rx="3" fill="#cfd7e2"/><path d="M52 30C52 19 68 19 68 30Z" fill="#ef4444"/>
     <rect x="44" y="92" width="32" height="20" rx="4" fill="#f4f6f9"/><path d="M50 97H70M50 102H64" stroke="#c4242a" stroke-width="2.2" stroke-linecap="round"/>`],
@@ -177,7 +191,22 @@ function summary() {
   $("summary").innerHTML = esc(tp(M.length, "{n} member works for you.", "{n} members work for you.")) + " "
     + t("<b>{a}</b> working, <b>{b}</b> waiting, <b>{c}</b> resting.", { a: c.work, b: c.wait, c: c.rest }) + " "
     + esc(t("Open a member to see what it did and what it will do."));
+  today();
 }
+/** One line under the title: what the members ran since midnight, and what it cost. */
+function today() {
+  const start = new Date(now() * 1000); start.setHours(0, 0, 0, 0);
+  const since = start.getTime() / 1000;
+  // a run that two members share (prefix names) counts once
+  const runs = [...new Map(M.flatMap(m => m.runs).map(r => [r.login + "/" + r.run_id, r])).values()]
+    .filter(r => r.started >= since && (mode !== "replay" || r.started <= clock));
+  const usd = runs.reduce((s, r) => s + (r.cost_counted > 0 ? r.cost_counted : 0), 0);
+  const est = runs.some(r => r.cost_estimated);
+  $("today").textContent = runs.length
+    ? tp(runs.length, "Today: {n} run", "Today: {n} runs") + (usd > 0 ? " · " + (est ? "≈ " : "") + money(usd) : "")
+    : t("Today: no run yet.");
+}
+
 function chip() {
   $("chiptext").textContent = mode === "replay" ? t("Replay · {t}", { t: when(clock) })
     : document.body.classList.contains("offline") ? t("Offline") : t("Live · {t}", { t: hm(nowS()) });
@@ -193,7 +222,6 @@ function log(msg, at) {
   f.prepend(li);
   while (f.children.length > 3) f.lastChild.remove();
 }
-const nameOf = agent => { const m = M.find(x => (x.agents || []).includes(agent)); return m ? m.name || m.id : agent; };
 /** The last three starts and ends among the runs of the members. */
 function feedFromRuns() {
   $("feed").textContent = "";

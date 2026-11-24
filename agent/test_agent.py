@@ -157,12 +157,32 @@ with tempfile.TemporaryDirectory() as d:
             pass
     # the role is the ticket's agent field, else the lead's
     assert agent.role_for({"agent": "doc"}, team) == "doc" and agent.role_for({"agent": ""}, team) == "chef"
+    # a note of the project follows the role's own text, and only for the role that has it
+    noted = {"BLOG": {"lead": "chef", "roles": {n: {"key_file": os.path.join(d, n), **({"note": "One Rust check at a time."} if n == "dev" else {})} for n in ("chef", "dev", "doc")}}}
+    crew = agent.teams(noted, known)["BLOG"]["roles"]
+    assert crew["dev"]["text"].startswith(known["roles"]["dev"]["text"]) and crew["dev"]["text"].endswith(" One Rust check at a time.")
+    assert crew["doc"]["text"] == known["roles"]["doc"]["text"]
 
 # the paths of a role: the writer only touches documentation, the lead nothing
 change = "3\t1\tdocs/guide.md\0" + "1\t0\tREADME.md\0" + "2\t2\tapi/main.go\0"
 assert agent.outside(["*.md", "docs/*"], change) == ["api/main.go"]
 assert agent.outside([], change) == ["docs/guide.md", "README.md", "api/main.go"]
 assert agent.outside(["*"], change) == []
+
+# the repository of a web application under the same rules (read 2026-11-24): the developer may
+# change every part, the writer the Markdown files (docs/, the help pages of web/aide/); a person
+# merges what is forbidden (migrations, deploy files, Dockerfiles, .claude); CI files stop the pull request
+for path in ("web/aide/plan.md", "docs/adr/0101-x.md", "README.md", "DESIGN.md", "tools/e2e/README.md"):
+    assert agent.outside(known["roles"]["doc"]["paths"], f"1\t0\t{path}\0") == [], path
+for path in ("web/src/app/page.tsx", "backend-rs/src/api/plan.rs", "backend/src/app/x.py", "deploy/deploy.sh"):
+    assert agent.outside(known["roles"]["doc"]["paths"], f"1\t0\t{path}\0") == [path], path
+assert "paths" not in known["roles"]["dev"]
+for path in ("backend/migrations/versions/0099_x.py", "backend/alembic.ini", "deploy/docker-compose.yml", "backend-rs/Dockerfile",
+             "web/Dockerfile", ".claude/skills/x/SKILL.md", "CLAUDE.md", "renovate.json"):
+    assert agent.breaches(rules, f"1\t0\t{path}\0", "") == {"files": [path]}, path
+for path in (".github/workflows/ci.yml", ".env.prod"):
+    assert agent.blocking(agent.breaches(rules, f"1\t0\t{path}\0", ""), rules) == [path], path
+assert agent.breaches(rules, "1\t0\tweb/src/app/page.tsx\0" + "1\t0\tbackend-rs/src/api/plan.rs\0", "") == {}
 
 # the writer waits for the other roles of the same parent, not for its own
 parent = {"id": "SHOP-70", "title": "Epic", "description": "All of it", "children": [

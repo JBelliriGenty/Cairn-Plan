@@ -59,6 +59,7 @@ a { color: var(--accent); }
 h1 { font: 800 clamp(40px, 7vw, 68px)/1 var(--f-body); letter-spacing: -0.03em; margin: 0; text-wrap: balance; }
 .summary { margin: 0; font-size: 17px; color: var(--muted); max-width: 62ch; }
 .summary b { color: var(--fg); font-weight: 600; }
+.today { margin: 0; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .alert { margin: 18px 0 0; padding: 10px 14px; border-radius: 12px; background: var(--warn-bg); color: var(--warn); font-size: 14px; }
 
 /* feed */

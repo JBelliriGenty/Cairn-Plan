@@ -141,7 +141,10 @@ const DICT = {
     "Also send them to me by e-mail": "Me les envoyer aussi par courriel",
     // refusals (server messages)
     "request failed": "la demande a échoué",
-    "Your session has ended. Reload the page to sign in again.": "Votre session est terminée. Rechargez la page pour vous reconnecter.", "invalid request": "demande invalide", "not found": "introuvable",
+    "Your session has ended. Your text is kept: sign in again, then send again.": "Votre session est terminée. Votre texte est gardé : reconnectez-vous, puis envoyez de nouveau.",
+    "Your session has ended. What you typed is kept in this browser.": "Votre session est terminée. Ce que vous avez tapé est gardé dans ce navigateur.",
+    "Sign in again (new tab)": "Se reconnecter (nouvel onglet)", "then come back to this tab and send again.": "puis revenez dans cet onglet et envoyez de nouveau.",
+    "Draft restored": "Brouillon restauré", "invalid request": "demande invalide", "not found": "introuvable",
     "database error": "erreur de la base de données", "access denied": "accès refusé",
     "no such project": "projet introuvable", "no such ticket": "ticket introuvable", "no such link": "lien introuvable",
     "only an administrator can create a project": "seul un administrateur peut créer un projet",
@@ -266,6 +269,8 @@ const DICT = {
     "Cairn Plan does not answer. The page tries again in 20 seconds.": "Cairn Plan ne répond pas. La page réessaie dans 20 secondes.",
     "No run in the last 24 hours: nothing to replay.": "Aucune exécution ces dernières 24 heures : rien à rejouer.",
     "Replay of the last 24 hours, in one minute.": "Rejeu des dernières 24 heures, en une minute.",
+    "Today: {n} run": "Aujourd'hui : {n} exécution", "Today: {n} runs": "Aujourd'hui : {n} exécutions",
+    "Today: no run yet.": "Aujourd'hui : aucune exécution pour l'instant.",
     "Stop the replay": "Arrêter le rejeu", "Replay the last 24 hours": "Rejouer les dernières 24 heures",
     "Each agent reports its runs to Cairn Plan. The queue lists the open tickets assigned to it. The page reads again every 20 seconds.":
       "Chaque agent envoie ses exécutions à Cairn Plan. La file liste les tickets ouverts qui lui sont assignés. La page se relit toutes les 20 secondes.",

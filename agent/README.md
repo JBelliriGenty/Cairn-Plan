@@ -106,6 +106,10 @@ use another file); `AGENT_TEAMS` picks them per project:
   "doc": {"model": "claude-sonnet-5-5", "usd": 4}}}}
 ```
 
+A role may also carry a `note`: text that only this project's team needs
+(a check to run one at a time, say). It is added to the role's text of
+`team.json`, so the common texts name no project.
+
 Each role reads its key in `mcp-key-<role>`, next to `PLAN_MCP_KEY_FILE`
 (or `key_file`). On the Cairn Plan side, `mcp_accounts` maps each key to
 its account (`{"agent-dev": "claude-dev"}`), and `cairn-plan member

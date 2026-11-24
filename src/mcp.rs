@@ -23,19 +23,19 @@ Something only a project owner can do or decide outside a ticket (a secret, an a
 Such a ticket waits on the owner; once they move it to \"todo\", they approved what its description says you will do next, and their comments are their answer. Times (\"at\", \"created\", \"updated\") are Unix seconds, UTC; an empty string is a date that is not set.";
 
 fn tools() -> Value {
-    let id = json!({"type": "string", "description": "Ticket id, e.g. SHOP-12"});
+    let id = json!({"type": "string", "description": "Ticket id, e.g. APP-12"});
     json!([
         {"name": "list_projects", "description": "Projects this account is a member of, with their space, this account's role and ticket counts (\"open\": tickets neither done nor cancelled; \"total\": all).",
          "inputSchema": {"type": "object", "properties": {}}},
         {"name": "list_tickets", "description": "Tickets of a project in one state. Default state: \"todo\", the tickets approved by a project owner and waiting to be done.",
          "inputSchema": {"type": "object", "required": ["project"], "properties": {
-             "project": {"type": "string", "description": "Project key, e.g. SHOP"},
+             "project": {"type": "string", "description": "Project key, e.g. APP"},
              "state": {"type": "string", "enum": ["todo", "backlog", "in_progress", "waiting", "done", "cancelled", "all"],
                        "description": "Default \"todo\". \"backlog\": proposals not approved yet. \"all\": every ticket of the project."}}}},
         {"name": "search_tickets", "description": "Tickets whose id, title, description or comments hold a text, in the projects of this account (or in one project), newest first, 50 at most. Use it to find what was decided or done before: an earlier lot, a past answer. \"excerpt\" is the text around the match when it is not in the title.",
          "inputSchema": {"type": "object", "required": ["query"], "properties": {
              "query": {"type": "string", "description": "2 to 100 characters, read as they are (no wildcard)"},
-             "project": {"type": "string", "description": "Project key, e.g. SHOP; left out: every project of this account"}}}},
+             "project": {"type": "string", "description": "Project key, e.g. APP; left out: every project of this account"}}}},
         {"name": "get_ticket", "description": "A ticket in full: text, links, comments, history, and \"approval\" (who moved it to \"todo\", when, and edits of its text since).",
          "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": id}}},
         {"name": "take_ticket", "description": "Start or resume work on an approved ticket: \"todo\", or \"waiting\" when it is assigned to this account, becomes \"in_progress\", assigned to this account (whoever it was assigned to). Refused in any other state.",
@@ -54,12 +54,12 @@ fn tools() -> Value {
              "minutes": {"type": "integer", "description": "Time actually worked on the ticket, in minutes, logged as time spent under this account; leave out if unknown"}}}},
         {"name": "propose_ticket", "description": "Propose a new ticket (a follow-up, something noticed). It starts in state \"backlog\": a proposal, listed by list_tickets with state \"backlog\", that a project owner may approve.",
          "inputSchema": {"type": "object", "required": ["project", "title"], "properties": {
-             "project": {"type": "string", "description": "Project key, e.g. SHOP"},
+             "project": {"type": "string", "description": "Project key, e.g. APP"},
              "title": {"type": "string", "description": "One line: what is asked"},
              "description": {"type": "string", "description": "Details: goal, context, what done looks like"}}}},
         {"name": "create_subticket", "description": "Split a ticket you took (\"in_progress\", assigned to this account) into sub-tickets of the same project. Its approval covers them: they start \"todo\", and the agent of their role takes them. Only parts of what the parent asks, never more: whoever builds a sub-ticket checks it against the parent. One level, at most 8 per ticket.",
          "inputSchema": {"type": "object", "required": ["parent", "title", "role"], "properties": {
-             "parent": {"type": "string", "description": "Id of the ticket being split, e.g. SHOP-70"},
+             "parent": {"type": "string", "description": "Id of the ticket being split, e.g. APP-70"},
              "title": {"type": "string", "description": "One line: this part of the parent"},
              "description": {"type": "string", "description": "What to do, where, and what done looks like"},
              "role": {"type": "string", "description": "Who builds it, a role of this project's agents, e.g. dev or doc"}}}},
@@ -75,8 +75,8 @@ fn tools() -> Value {
              "started": {"type": "integer", "description": "Start, seconds since 1970 (UTC)"},
              "ended": {"type": "integer", "description": "End, seconds since 1970; left out for a run that is going on, set to now when the state is not \"running\""},
              "host": {"type": "string", "description": "Host where the agent runs"},
-             "project": {"type": "string", "description": "Project key, e.g. SHOP; left out: read from the ticket, else none"},
-             "ticket": {"type": "string", "description": "Ticket id, e.g. SHOP-12"},
+             "project": {"type": "string", "description": "Project key, e.g. APP; left out: read from the ticket, else none"},
+             "ticket": {"type": "string", "description": "Ticket id, e.g. APP-12"},
              "model": {"type": "string", "description": "Model used, e.g. claude-sonnet-5-5"},
              "tokens_in": {"type": "integer", "description": "Tokens read, the cache included"},
              "tokens_out": {"type": "integer", "description": "Tokens written"},
@@ -87,7 +87,7 @@ fn tools() -> Value {
              "result": {"type": "string", "description": "Verdict in a few words, 60 characters at most, e.g. conforme, 3 écarts, deployed"}}}},
         {"name": "ask_owner", "description": "Ask a project owner for what only they can do or decide (a secret, an account, a firewall change, a choice): opens a ticket in state \"waiting\", assigned to them, who is notified. They answer in a comment, then move the ticket to \"done\" (nothing more for you) or to \"todo\" (you carry on as the ticket says).",
          "inputSchema": {"type": "object", "required": ["project", "title", "question"], "properties": {
-             "project": {"type": "string", "description": "Project key, e.g. SHOP"},
+             "project": {"type": "string", "description": "Project key, e.g. APP"},
              "title": {"type": "string", "description": "One line: what the owner is asked to do or decide"},
              "question": {"type": "string", "description": "Read on its own, on a phone: context, what is ready, the commands to paste in fenced code blocks, what you will do once answered"},
              "owner": {"type": "string", "description": "Login of the project owner to ask; left out: the first owner of the project"}}}},

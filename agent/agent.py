@@ -146,6 +146,8 @@ def teams(given, known):
         roles = {}
         for name, own in team["roles"].items():
             role = {**known["roles"].get(name, {}), **own}
+            if role.get("note"):  # what only this project's team must know, after the role's own text
+                role["text"] = f"{role.get('text', '')} {role['note']}".strip()
             # default: mcp-key-<role> next to the agent's own key
             path = role.get("key_file") or os.path.join(os.path.dirname(env("PLAN_MCP_KEY_FILE", "/run/agent/x")), f"mcp-key-{name}")
             role["key"] = open(path, encoding="utf-8").read().strip() if os.path.isfile(path) else ""

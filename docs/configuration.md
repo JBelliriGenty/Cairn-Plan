@@ -211,7 +211,8 @@ answer, resting), its current task and for how long. A click opens its sheet:
 on one side what it did (its runs, latest first, with the result of the check
 and the cost), on the other side its queue (the open tickets assigned to it,
 in the order it will take them). The page reads again every 20 seconds.
-"Replay the last 24 hours" plays the runs of the day in one minute.
+"Replay the last 24 hours" plays the runs of the day in one minute. A line
+under the title gives the runs of the members since midnight and their cost.
 
 ```mermaid
 flowchart LR
@@ -242,9 +243,9 @@ The members come from the `team` key of the configuration file:
 | `id` | Short name of the member, in the page address (`/team#worker`). |
 | `name`, `role`, `motto` | What the page shows. |
 | `group` | The `id` of its section. |
-| `look` | Its drawing: `conductor`, `hardhat`, `glasses`, `nightcap`, `dog-headset`, `dog-laptop`, `dog-book`, `cairn`, `courier`, `beacon`; any other value: a plain pebble. |
+| `look` | Its drawing: `conductor`, `hardhat`, `glasses`, `nightcap`, `dog-headset`, `dog-laptop`, `dog-book`, `cairn`, `courier`, `beacon`, `toolbox`, `binoculars`, `shield`, `scales`; any other value: a plain pebble. |
 | `hue` | Its colour, `#rrggbb`. |
-| `agents` | The `agent` names of its runs (`report_run`). |
+| `agents` | The `agent` names of its runs (`report_run`). A name ending with `*` is a prefix: `"review-*"` takes every agent whose name starts with `review-`. |
 | `assignees` | The logins whose open tickets form its queue. |
 | `rest`, `empty_queue` | Optional texts shown when it rests, and when its queue is empty. |
 

@@ -1,5 +1,5 @@
 {
-  "_": "Roles a project team may use (AGENT_TEAMS picks them per project, with model, budget and MCP key). allowed: tools of Claude Code. paths: what the role may change, checked by agent.py on the diff before any push (a pattern with a / against the whole path, one without against the file name; * also crosses folders); no paths key: the whole repository. splits: the role splits its ticket into sub-tickets and builds nothing. waits: the role starts once the other parts of the same parent are closed. text: the role, told to Claude.",
+  "_": "Roles a project team may use (AGENT_TEAMS picks them per project, with model, budget, MCP key and, if the project needs one, a note added to the role text; the paths below hold for every project, rules.json too). allowed: tools of Claude Code. paths: what the role may change, checked by agent.py on the diff before any push (a pattern with a / against the whole path, one without against the file name; * also crosses folders); no paths key: the whole repository. splits: the role splits its ticket into sub-tickets and builds nothing. waits: the role starts once the other parts of the same parent are closed. text: the role, told to Claude.",
   "roles": {
     "chef": {
       "prompt": "prompt-chef.md",
@@ -14,7 +14,7 @@
     "dev": {
       "allowed": ["Read", "Edit", "Write", "Glob", "Grep", "Bash",
                   "mcp__plan__get_ticket", "mcp__plan__comment_ticket", "mcp__plan__wait_ticket", "mcp__plan__propose_ticket"],
-      "text": "Developer: changes the code (backend, front end, agent, mobile app) and its tests, as the sub-ticket asks; the pull request is opened for you. Documentation for people is the writer's: leave it, unless a line of a README must follow a change you make."
+      "text": "Developer: changes the code of the repository (every part of it) and its tests, as the sub-ticket asks; the pull request is opened for you. Documentation for people is the writer's: leave it, unless a line of a README must follow a change you make."
     },
     "doc": {
       "allowed": ["Read", "Edit", "Write", "Glob", "Grep", "Bash",

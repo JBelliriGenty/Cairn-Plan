@@ -9,7 +9,7 @@
     ".forgejo/*", ".github/*", ".gitea/*", ".claude/*", "deploy/*",
     "Dockerfile*", "Containerfile*", "compose*.yml", "compose*.yaml", "docker-compose*.yml", "docker-compose*.yaml",
     ".env*", "*.sops.*", "secrets*", "renovate.json", "CLAUDE.md", "AGENTS.md", ".gitattributes", ".gitmodules",
-    "backend/migrations/*"
+    "backend/migrations/*", "backend/alembic.ini"
   ],
   "forbidden_added": "(?i)\\bdrop\\s+(table|index|column|schema|database|view|trigger)\\b|\\brename\\s+(to|column)\\b|\\balter\\s+column\\b|\\btruncate\\b"
 }
