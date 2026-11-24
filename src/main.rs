@@ -21,6 +21,9 @@ const JS: &str = include_str!("../www/plan.js");
 const CSS: &str = include_str!("../www/plan.css");
 const I18N: &str = include_str!("../www/i18n.js");
 const ICON: &str = include_str!("../www/icon.svg");
+const TEAM: &str = include_str!("../www/team.html");
+const TEAM_JS: &str = include_str!("../www/team.js");
+const TEAM_CSS: &str = include_str!("../www/team.css");
 // Mermaid, pinned (11.12.0, MIT): served from here, never from a CDN, and only
 // fetched by a page that shows a ```mermaid block. The version is in the name,
 // so the file can be cached for good.
@@ -28,11 +31,11 @@ const MERMAID: &str = include_str!("../www/mermaid-11.12.0.min.js");
 const MERMAID_PATH: &str = "mermaid-11.12.0.min.js";
 
 /// Every key read from the configuration file (checked against the docs by a test).
-const KEYS: [&str; 22] = [
+const KEYS: [&str; 23] = [
     "listen", "trusted_proxies", "require_groups", "admin_groups", "db", "lang", "mcp_keys_file", "mcp_login", "mcp_accounts",
     "webhook_secrets_file",
     "public_url", "smtp_host", "smtp_port", "smtp_credentials_file", "mail_from", "ntfy_url", "ntfy_token_file", "ntfy_topics",
-    "agent_hook_url", "agent_hook_secret_file", "oidc_issuer", "oidc_client_id",
+    "agent_hook_url", "agent_hook_secret_file", "oidc_issuer", "oidc_client_id", "team",
 ];
 
 struct Config {
@@ -61,6 +64,8 @@ struct Config {
     files: std::path::PathBuf,
     /// Folder of the profile photos: "avatars", next to the database.
     avatars: std::path::PathBuf,
+    /// The team page: {"groups": [...], "members": [...]} (docs/configuration.md); null: none.
+    team: Value,
 }
 
 /// Largest file that can be attached to a ticket.
@@ -117,6 +122,7 @@ impl Config {
             webhook_secrets: secrets_file(&v, "webhook_secrets_file"),
             files: std::path::Path::new(&s("db", "/var/lib/cairn-plan/plan.db")).with_file_name("files"),
             avatars: std::path::Path::new(&s("db", "/var/lib/cairn-plan/plan.db")).with_file_name("avatars"),
+            team: v["team"].clone(),
             agent_hook: (s("agent_hook_url", ""), secret("agent_hook_secret_file")),
             outside: notify::Outside {
                 public_url: s("public_url", "").trim_end_matches('/').to_string(),
@@ -810,6 +816,9 @@ fn handle(cfg: &'static Config, mut r: Request) {
         (Method::Get, ["plan.css"]) => return page(r, CSS, "text/css"),
         (Method::Get, ["i18n.js"]) => return page(r, I18N, "text/javascript"),
         (Method::Get, ["icon.svg"]) => return page(r, ICON, "image/svg+xml"),
+        (Method::Get, ["team"]) => return page(r, TEAM, "text/html"),
+        (Method::Get, ["team.js"]) => return page(r, TEAM_JS, "text/javascript"),
+        (Method::Get, ["team.css"]) => return page(r, TEAM_CSS, "text/css"),
         (Method::Get, [f]) if *f == MERMAID_PATH => {
             return respond_cached(r, 200, MERMAID.into(), "text/javascript", "private, max-age=31536000, immutable")
         }
@@ -833,7 +842,7 @@ fn handle(cfg: &'static Config, mut r: Request) {
                 "ntfy": outside(cfg, &saved).ntfy.is_some(), "ntfy_topic": store::ntfy_topic(&c, &who.login),
                 "ntfy_prefix": saved.get("ntfy_prefix").map(String::as_str).unwrap_or(""),
                 "version": env!("CARGO_PKG_VERSION"), "states": store::STATES, "priorities": store::PRIORITIES,
-                "agents": agent_logins(cfg), "photos": store::photos(&c).unwrap_or_default(),
+                "agents": agent_logins(cfg), "photos": store::photos(&c).unwrap_or_default(), "money": store::my_money(&c, &who.login),
             }))
         }
         (Method::Post, ["api", "me"]) => store::set_prefs(&c, &who, &body),
@@ -857,6 +866,8 @@ fn handle(cfg: &'static Config, mut r: Request) {
         (Method::Post, ["api", "tickets", id, "links"]) => store::link(&c, &who, id, &body),
         (Method::Post, ["api", "tickets", id, "work"]) => store::log_work(&c, &who, id, &body),
         (Method::Post, ["api", "rates"]) => store::set_rate(&c, &who, &body),
+        (Method::Get, ["api", "agent-rates"]) => store::agent_rates(&c, &who),
+        (Method::Get, ["api", "team"]) => store::team(&c, &who, &cfg.team),
         (Method::Get, ["api", "projects", key, "export"]) => store::export_project(&c, &who, key),
         (Method::Get, ["api", "projects", key, "time"]) => store::time_report(&c, &who, store::Scope::Project(key), &agent_logins(cfg)),
         (Method::Get, ["api", "spaces", name, "time"]) => {

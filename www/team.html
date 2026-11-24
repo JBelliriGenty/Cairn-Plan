@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<!-- cairn-plan team page (embedded in the binary, served at /team). CSP: no inline JS or CSS. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Team</title>
+  <link href="icon.svg" rel="icon" type="image/svg+xml">
+  <link href="team.css" rel="stylesheet">
+  <script src="i18n.js" defer></script>
+  <script src="team.js" defer></script>
+</head>
+<body>
+<div class="page">
+  <main class="sheet">
+    <div class="bar">
+      <a class="brand" id="brand" href="./"><img src="icon.svg" alt=""><span id="host"></span></a>
+      <div class="live">
+        <span class="chip-live"><i></i><span id="chiptext"></span></span>
+        <button class="btn" id="replay" type="button">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8a5 5 0 1 0 1.6-3.7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M2.5 2.2v3.3h3.3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span id="replaylabel"></span>
+        </button>
+      </div>
+    </div>
+    <div class="progress" id="prog" hidden><b id="progbar"></b></div>
+    <div class="intro">
+      <h1 id="title"></h1>
+      <p class="summary" id="summary"></p>
+    </div>
+    <p class="alert" id="alert" role="alert" hidden></p>
+    <ol class="feed" id="feed" aria-live="polite"></ol>
+    <div id="teams"></div>
+    <p class="foot" id="foot"></p>
+  </main>
+</div>
+<dialog id="fiche" aria-labelledby="fname"><div class="fiche-in" id="ficheIn"></div></dialog>
+</body>
+</html>

@@ -65,7 +65,7 @@ fn tools() -> Value {
              "role": {"type": "string", "description": "Who builds it, a role of this project's agents, e.g. dev or doc"}}}},
         {"name": "close_question", "description": "Close a question you asked yourself with ask_owner, once you no longer need the answer (done another way, no longer useful): writes the report as a comment, then \"waiting\" becomes \"done\". Refused if this account did not ask it, or if it is no longer \"waiting\".",
          "inputSchema": {"type": "object", "required": ["id", "report"], "properties": {"id": id, "report": {"type": "string", "description": "Why it is closed: what was done instead, written as the closing comment"}}}},
-        {"name": "report_run", "description": "Report a run of an agent (a session, a task, a ticket worked) so that it shows on the Agents page: send it when it starts (state \"running\") and again, with the same run_id, when it ends (\"ok\", \"failed\" or \"waiting\"); what the second report leaves out is kept. Only your own runs: another account's run_id is refused. A run of a project is reported by a contributor of that project and is seen by its members; a run without a project is seen by administrators only. A summary only: never the instruction given to the agent, nor the output of a command.",
+        {"name": "report_run", "description": "Report a run of an agent (a session, a task, a ticket worked) so that it shows on the Agents page: send it when it starts (state \"running\") and again, with the same run_id, when it ends (\"ok\", \"failed\" or \"waiting\"); what the second report leaves out is kept. Only your own runs: a run_id is yours, another account's run with the same id is another run. A run of a project is reported by a contributor of that project and is seen by its members; a run without a project is seen by administrators only. A summary only: never the instruction given to the agent, nor the output of a command.",
          "inputSchema": {"type": "object", "required": ["run_id", "agent", "source", "task", "state", "started"], "properties": {
              "run_id": {"type": "string", "description": "Stable text given by the source, 100 characters at most; sending it again updates the run"},
              "agent": {"type": "string", "description": "Name shown for the agent, e.g. ouvrier, controleur, night routine"},
@@ -78,9 +78,11 @@ fn tools() -> Value {
              "project": {"type": "string", "description": "Project key, e.g. SHOP; left out: read from the ticket, else none"},
              "ticket": {"type": "string", "description": "Ticket id, e.g. SHOP-12"},
              "model": {"type": "string", "description": "Model used, e.g. claude-sonnet-5-5"},
-             "tokens_in": {"type": "integer", "description": "Tokens read"},
+             "tokens_in": {"type": "integer", "description": "Tokens read, the cache included"},
              "tokens_out": {"type": "integer", "description": "Tokens written"},
-             "cost_usd": {"type": "number", "description": "Cost in dollars at the API price, as Claude Code counts it (total_cost_usd); left out when unknown"},
+             "tokens_cache_read": {"type": "integer", "description": "Part of tokens_in read from the cache; with tokens_cache_write, lets Cairn Plan estimate the cost of a run that gives none"},
+             "tokens_cache_write": {"type": "integer", "description": "Part of tokens_in written to the cache"},
+             "cost_usd": {"type": "number", "description": "Cost in dollars at the API price, as Claude Code counts it (total_cost_usd); left out when unknown (Cairn Plan then estimates it from the tokens). A run that gives the cost of everything it started loses the estimated cost of the runs that name it as their parent; give no cost_usd to a run whose cost is already in its parent's"},
              "parent": {"type": "string", "description": "run_id of the run that started this one"},
              "result": {"type": "string", "description": "Verdict in a few words, 60 characters at most, e.g. conforme, 3 écarts, deployed"}}}},
         {"name": "ask_owner", "description": "Ask a project owner for what only they can do or decide (a secret, an account, a firewall change, a choice): opens a ticket in state \"waiting\", assigned to them, who is notified. They answer in a comment, then move the ticket to \"done\" (nothing more for you) or to \"todo\" (you carry on as the ticket says).",
@@ -346,7 +348,9 @@ mod tests {
         let end = ok(&c, &claude, "report_run", json!({"run_id": "s1", "state": "ok", "ended": 1060, "cost_usd": 0.04}));
         assert_eq!((end["state"].as_str(), end["task"].as_str(), end["cost_usd"].as_f64()), (Some("ok"), Some("Clean up"), Some(0.04)));
         assert!(refused(&c, &claude, "report_run", json!({"run_id": "s2"})).contains("agent is required"));
+        // another account with the same run_id never completes or changes this run
         let other = Actor { login: "other".into(), admin: false };
-        assert!(refused(&c, &other, "report_run", json!({"run_id": "s1", "state": "failed"})).contains("another account"));
+        assert!(refused(&c, &other, "report_run", json!({"run_id": "s1", "state": "failed"})).contains("is required"));
+        assert_eq!(store::runs(&c, &jane, "", "", "").unwrap()[0]["state"], "ok");
     }
 }

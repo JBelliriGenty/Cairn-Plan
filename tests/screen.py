@@ -17,7 +17,12 @@ with open(work + "/keys", "w") as f:
     f.write("test:" + KEY + "\n")
 with open(work + "/config.json", "w") as f:
     json.dump({"listen": "127.0.0.1:%d" % APP, "trusted_proxies": ["127.0.0.1"], "admin_groups": ["admins"],
-               "db": work + "/plan.db", "lang": "en", "mcp_keys_file": work + "/keys"}, f)
+               "db": work + "/plan.db", "lang": "en", "mcp_keys_file": work + "/keys",
+               # the team page: two members, the queue of worker is the tickets of bob
+               "team": {"groups": [{"id": "core", "title": "Core team"}],
+                        "members": [{"id": "worker", "name": "Worker", "group": "core", "look": "hardhat", "hue": "#e0803a",
+                                     "agents": ["ouvrier"], "assignees": ["bob"]},
+                                    {"id": "checker", "name": "Checker", "group": "core", "look": "glasses", "agents": ["controleur"]}]}}, f)
 server = subprocess.Popen(["cairn-plan", work + "/config.json"])
 
 
@@ -114,10 +119,13 @@ try:
         ("#/m", ["Waiting for your answer", "Give the key of the shed", "Draw the plan"]),
         ("#/p/DEMO/time", ["Time", "1"]),
         ("#/p/DEMO/members", ["Members of Demo project", "bob", "Export"]),
-        ("#/a", ["Agents", "1 agent at work", "Paint the roof", "Sweep the shed", "conforme", "The team", "ouvrier", "controleur"]),
-        ("#/s", ["Settings"]),
+        ("#/a", ["Agents", "1 agent at work", "Paint the roof", "Sweep the shed", "conforme", "The team", "ouvrier", "controleur", "an hour over 30 days"]),
+        ("#/u", ["My hourly rate"]),
+        ("#/s", ["Settings", "Currencies", "Value of one dollar", "Price of a million tokens"]),
         ("#/q", ["Search", "Type two characters or more."]),
         ("#/agent", ["Agent", "No agent is set"]),
+        ("team", ["The team", "Core team", "Worker", "Working", "Paint the roof", "Checker", "Resting"]),
+        ("team#worker", ["What it did", "Sweep the shed", "In its queue", "DEMO-1"]),
     ]
     bad = []
     for route, wanted in pages:

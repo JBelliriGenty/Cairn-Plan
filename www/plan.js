@@ -936,8 +936,25 @@ function photoButtons(login, choose = true) {
 
 // One idea: my photo. An administrator also sets the photo of the agents, which never open
 // the page, and can remove the photo of someone (not choose it).
+// What an hour of my time costs: given here, seen by me, the administrators and the owners of the projects.
+function myRate() {
+  const m = ME.money, cents = el("input", { type: "number", min: 0, max: 10000, step: "0.5", value: m.rate ? m.rate / 100 : "", placeholder: "0", "aria-label": t("Hourly rate") });
+  const code = select(m.currencies.includes(m.rate_currency) ? m.currencies : [m.rate_currency, ...m.currencies], m.rate_currency, c => c);
+  return el("form", { class: "card form", onsubmit: act(async () => {
+    const rate = Math.round(Number(cents.value || 0) * 100);
+    await api("api/rates", { rate, rate_currency: code.value });
+    Object.assign(ME.money, { rate, rate_currency: code.value });
+    toast(t("Saved"));
+  }) },
+    el("h2", {}, t("My hourly rate")),
+    el("p", { class: "meta" }, t("What an hour of your time costs. The Time page multiplies it by the time you log. Only you, the administrators and the owners of your projects see it.")),
+    el("div", { class: "row" }, cents, code, el("button", { class: "primary" }, t("Save"))));
+}
+
 async function profile() {
-  ME.photos = (await api("api/me")).photos || {};   // what others changed since the page was opened
+  const me = await api("api/me");   // what others changed since the page was opened
+  ME.photos = me.photos || {};
+  ME.money = me.money;
   const agents = ME.admin ? [...new Set(ME.agents || [])].sort() : [];
   const people = ME.admin ? Object.keys(ME.photos).filter(l => l !== ME.login && !agents.includes(l)).sort() : [];
   const rows = (logins, choose) => el("ul", { class: "list" },
@@ -948,6 +965,7 @@ async function profile() {
     el("div", { class: "card profile" }, avatar(ME.login, "xl"),
       el("div", {}, el("strong", {}, ME.name || ME.login), el("p", { class: "meta" }, ME.login), photoButtons(ME.login),
         el("small", {}, t("PNG, JPEG or WebP. You frame the photo before it is saved.")))),
+    myRate(),
     agents.length > 0 && el("div", { class: "card" }, el("h2", {}, t("Agents")),
       el("p", { class: "meta" }, t("An agent never opens this page: an administrator chooses its photo. It stays a square.")),
       rows(agents, true)),
@@ -958,6 +976,39 @@ async function profile() {
 }
 
 /* ---------- settings (administrators) ---------- */
+
+// The currency amounts are shown in, and what one dollar is worth in each currency (agents cost dollars).
+function currencies() {
+  const m = ME.money, code = select(m.currencies, m.currency, c => c);
+  const table = el("textarea", { rows: 8, spellcheck: false, "aria-label": t("Value of one dollar") });
+  table.value = m.currencies.map(c => c + " " + m.fx[c]).join("\n");
+  const prices = el("textarea", { rows: 6, spellcheck: false, "aria-label": t("Price of a million tokens") });
+  prices.value = Object.entries(m.prices).map(([model, p]) => model + " " + p.join(" ")).join("\n");
+  return el("form", { class: "card form", onsubmit: act(async () => {
+    const fx = {};
+    for (const l of table.value.split("\n").map(x => x.trim()).filter(Boolean)) {
+      const [c, n] = l.split(/\s+/);
+      fx[c.toUpperCase()] = Number((n || "").replace(",", "."));
+    }
+    const priceTable = {};
+    for (const l of prices.value.split("\n").map(x => x.trim()).filter(Boolean)) {
+      const [model, ...p] = l.split(/\s+/);
+      priceTable[model] = p.map(n => Number(n.replace(",", ".")));
+    }
+    await api("api/rates", { fx, currency: code.value, prices: priceTable });
+    ME.money = (await api("api/me")).money;
+    await settings();
+    toast(t("Saved"));
+  }) },
+    el("h2", {}, t("Currencies")),
+    el("p", { class: "meta" }, t("Amounts are shown in this currency. Each member gives their hourly rate in their own currency; agents cost dollars.")),
+    field("Shown in", code),
+    field("Value of one dollar", table, "One currency per line: its code (EUR) and what one dollar is worth in it (0.92). Change the values when the rates move."),
+    el("p", { class: "meta" }, m.fx_date ? t("Rates entered on {date}.", { date: day(m.fx_date) }) : t("Rates not entered yet: these are indicative values.")),
+    field("Price of a million tokens", prices, "One model per line: its name, then the dollars for a million tokens of input, output, cache read and cache write (1 hour). A run that reports no cost is estimated with it."),
+    el("p", { class: "meta" }, t("Prices dated {date}, read at {source}.", { date: day(m.prices_date), source: m.prices_source })),
+    el("div", { class: "row" }, el("button", { class: "primary" }, t("Save"))));
+}
 
 async function settings() {
   const s = await api("api/settings");
@@ -1011,6 +1062,7 @@ async function settings() {
         field("Webhook address", f.agent_hook_url, "Empty: nothing is called."),
         field("Secret", f.agent_hook_secret, "16 characters or more, the same as in the agent. It signs each call. Leave empty to keep the one that is saved.")),
       el("div", { class: "row" }, el("button", { class: "primary" }, t("Save")))),
+    currencies(s),
     el("div", { class: "card form" },
       el("h2", {}, t("Try it")),
       el("p", { class: "meta" }, t("Sends one message to you with the settings that are saved. The answer of the server is shown if it fails.")),
@@ -1067,20 +1119,34 @@ function timeFigures(r) {
     agents: sum(work.filter(w => agent(w.login)), w => w.minutes), money: sum(work, cents), usd: sum(costs, k => k.usd),
     lead: closed.length ? sum(closed, k => k.closed - k.created) / closed.length : 0 };
 }
-const amount = (r, cents) => Math.round(cents / 100).toLocaleString(LOCALE()) + " " + r.currency;
+// An amount in an ISO currency ("EUR"): the browser knows the sign and where it goes.
+const fmt = (n, code) => new Intl.NumberFormat(LOCALE(), { style: "currency", currency: code, minimumFractionDigits: Math.abs(n) < 100 ? 2 : 0, maximumFractionDigits: Math.abs(n) < 100 ? 2 : 0 }).format(n);
+const amount = (r, cents) => fmt(cents / 100, r.currency);
+// Dollars (what agents cost) in the currency of the page, through the table of the settings.
+const money = usd => fmt(usd * (ME.money.fx[ME.money.currency] || 1), ME.money.currency);
 const dollars = usd => usd.toLocaleString(LOCALE(), { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " $";
-/** People in the currency of the rates, agents in dollars: "1 187 € + 9,04 $", or nothing. */
-const cost = (r, cents, usd) => [cents >= 50 && amount(r, cents), usd > 0 && dollars(usd)].filter(Boolean).join(" + ");
+/** What people and agents cost, as one amount in the currency of the page: "1 196 €", or nothing. `by`: cents per
+ *  currency as each person gave their rate (dollars for agents): it shows under the pointer, "800 CHF + 300 € + 9,04 $". */
+const cost = (r, cents, usd, by) => {
+  const all = cents + usd * r.per_usd * 100;
+  if (all < 50) return "";
+  const parts = Object.entries(by || {}).filter(([, v]) => v >= 1).map(([code, v]) => fmt(v / 100, code));
+  return el("span", { title: parts.length > 1 || (by && Object.keys(by).some(c => c !== r.currency)) ? parts.join(" + ") : "" }, amount(r, all));
+};
+const addBy = (by, code, cents) => { by[code] = (by[code] || 0) + cents; };
+/** What one entry of time adds to a detail by currency: the rate of the person, in the currency they gave it. */
+const peopleBy = (r, f, w, by) => { const o = r.rates_own[w.login]; if (r.money && o && !f.agent(w.login)) addBy(by, o.currency, w.minutes * o.rate / 60); };
+const mergeBy = rows => { const by = {}; for (const x of rows) for (const [code, v] of Object.entries(x.by)) addBy(by, code, v); return by; };
 
 /** Rows {key, label, min, cents, usd}, largest first, from the entries and the agent costs grouped by a key. */
 function timeRows(r, f, keyOf, label) {
   const rows = new Map();
-  const row = k => rows.get(k) || rows.set(k, { key: k, label: label(k), min: 0, cents: 0, usd: 0, slots: f.slots.map(() => 0) }).get(k);
+  const row = k => rows.get(k) || rows.set(k, { key: k, label: label(k), min: 0, cents: 0, usd: 0, by: {}, slots: f.slots.map(() => 0) }).get(k);
   for (const w of f.work) {
-    const x = row(keyOf(w)); x.min += w.minutes; x.cents += f.cents(w);
+    const x = row(keyOf(w)); x.min += w.minutes; x.cents += f.cents(w); peopleBy(r, f, w, x.by);
     const i = f.slotOf(w.at); if (i >= 0) x.slots[i] += w.minutes;
   }
-  for (const k of f.costs) row(keyOf(k)).usd += k.usd;
+  for (const k of f.costs) { const x = row(keyOf(k)); x.usd += k.usd; addBy(x.by, "USD", k.usd * 100); }
   return [...rows.values()].sort((a, b) => b.min - a.min || b.usd - a.usd);
 }
 const byWho = (r, f) => timeRows(r, f, w => w.login, login => person(login));
@@ -1102,7 +1168,7 @@ function timeHero(r, f) {
     el("p", { class: "big" }, el("strong", {}, f.minutes ? span(f.minutes) : t("No time")), " ", el("span", {}, period)),
     el("div", { class: "facts" },
       fact("People", hours(f.people), r.money && f.money >= 50 ? amount(r, f.money) : ""),
-      fact("Agents", hours(f.agents), f.usd ? dollars(f.usd) : ""),
+      fact("Agents", hours(f.agents), f.usd ? amount(r, f.usd * r.per_usd * 100) : ""),
       fact("Tickets done", String(f.closed.length), f.closed.length ? t("in {t} on average", { t: clock(f.lead) }) : "")));
 }
 
@@ -1130,7 +1196,7 @@ function timeSummary(r, f) {
       el("span", { class: "name" }, x.label),
       el("span", { class: "track" }, el("span", { class: "fill", style: "width:" + Math.max(x.min ? 1 : 0, Math.round(100 * x.min / (rows[0].min || 1))) + "%" })),
       el("span", { class: "value" }, hours(x.min)),
-      el("small", {}, cost(r, x.cents, x.usd))))))
+      el("small", {}, cost(r, x.cents, x.usd, x.by))))))
       : el("p", { class: "empty" }, t("No time in this period.")));
   return [
     el("div", { class: "card" },
@@ -1149,10 +1215,10 @@ function timeSheet(r, f) {
       el("th", { class: "num" }, t("Total")), el("th", { class: "num" }, t("Cost")))),
     el("tbody", {}, shown.map(x => el("tr", {}, el("td", {}, x.label),
       x.slots.map(m => el("td", { class: "num" + (m ? "" : " none") }, m ? span(m) : "·")),
-      el("td", { class: "num total" }, hours(x.min)), el("td", { class: "num" }, cost(r, x.cents, x.usd) || "–")))),
+      el("td", { class: "num total" }, hours(x.min)), el("td", { class: "num" }, cost(r, x.cents, x.usd, x.by) || "–")))),
     el("tfoot", {}, el("tr", {}, el("td", {}, t("Total")),
       f.slots.map((s, i) => el("td", { class: "num" }, hours(sum(rows, x => x.slots[i])))),
-      el("td", { class: "num total" }, hours(sum(rows, x => x.min))), el("td", { class: "num" }, cost(r, sum(rows, x => x.cents), sum(rows, x => x.usd)) || "–")))))
+      el("td", { class: "num total" }, hours(sum(rows, x => x.min))), el("td", { class: "num" }, cost(r, sum(rows, x => x.cents), sum(rows, x => x.usd), mergeBy(rows)) || "–")))))
     : el("p", { class: "empty" }, t("No time in this period.")));
   return [sheet("Person", "who", byWho(r, f), 12), sheet(r.scope === "space" ? "Project" : "Ticket", "place", byPlace(r, f), 10)];
 }
@@ -1179,20 +1245,19 @@ function timeJournal(r, f) {
 function timeRates(r) {
   if (!ME.admin) return null;
   const logins = [...new Set(r.work.map(w => w.login))].filter(l => !r.agents.includes(l)).sort();
-  const inputs = logins.map(l => [l, el("input", { type: "number", min: 0, max: 10000, step: "0.5", value: r.rates[l] ? r.rates[l] / 100 : "", "aria-label": l, placeholder: "0" })]);
-  const currency = el("input", { maxLength: 8, value: r.currency, required: true });
+  const own = l => r.rates_own[l] || { rate: 0, currency: r.currency };
+  const inputs = logins.map(l => [l, el("input", { type: "number", min: 0, max: 10000, step: "0.5", value: own(l).rate ? own(l).rate / 100 : "", "aria-label": l, placeholder: "0" })]);
   return el("details", { class: "card rates" }, el("summary", {}, t("Hourly rates")),
     el("form", { class: "form", onsubmit: act(async () => {
-      if (currency.value !== r.currency) await api("api/rates", { currency: currency.value });
       for (const [l, i] of inputs) {
         const rate = Math.round(Number(i.value || 0) * 100);
-        if (rate !== (r.rates[l] || 0)) await api("api/rates", { login: l, rate });
+        if (rate !== own(l).rate) await api("api/rates", { login: l, rate });
       }
       await route();
       toast(t("Saved"));
     }) },
-      el("p", { class: "meta" }, t("What an hour of each person costs. The page multiplies it by the time logged. Only administrators and project owners see the amounts. Agents report their own cost.")),
-      el("div", { class: "fields" }, inputs.map(([l, i]) => el("label", { class: "field" }, person(l), i)), field("Currency", currency)),
+      el("p", { class: "meta" }, t("What an hour of each person costs, in the currency each person chose. The page converts it and multiplies it by the time logged. Only administrators and project owners see the amounts. Agents report their own cost.")),
+      el("div", { class: "fields" }, inputs.map(([l, i]) => el("label", { class: "field" }, el("span", {}, person(l), " ", el("small", {}, own(l).currency)), i))),
       !logins.length && el("p", { class: "empty" }, t("Nobody logged time yet.")),
       el("button", { class: "primary" }, t("Save"))));
 }
@@ -1243,13 +1308,14 @@ const lasted = r => clock(Math.max(60, finish(r) - r.started));
 
 // The runs of one ticket make one piece of work; a run without a ticket joins the run that started it.
 function pieces(runs) {
-  const byId = new Map(runs.map(r => [r.run_id, r]));
-  const root = r => { for (let i = 0; i < 10 && byId.has(r.parent); i++) r = byId.get(r.parent); return r; };
+  // a run is found by (account, run_id): the parent of a run is one of the same account
+  const id = (login, run) => login + "\0" + run, byId = new Map(runs.map(r => [id(r.login, r.run_id), r]));
+  const root = r => { for (let i = 0; i < 10 && byId.has(id(r.login, r.parent)); i++) r = byId.get(id(r.login, r.parent)); return r; };
   // the ticket of a run, else the one of the run that started it, and so on up
-  const ticketOf = r => { for (let i = 0; r && i < 10; i++, r = byId.get(r.parent)) if (r.ticket) return r.ticket; return ""; };
+  const ticketOf = r => { for (let i = 0; r && i < 10; i++, r = byId.get(id(r.login, r.parent))) if (r.ticket) return r.ticket; return ""; };
   const found = new Map();
   for (const r of runs) {
-    const key = ticketOf(r) || root(r).run_id;
+    const key = ticketOf(r) || id(root(r).login, root(r).run_id);
     if (!found.has(key)) found.set(key, { key, runs: [] });
     found.get(key).runs.push(r);
   }
@@ -1277,7 +1343,7 @@ function verdict(g) {
 
 function runFacts(r) {
   const out = [stamp(r.started), lasted(r), r.model, r.tokens_out != null && t("{n} tokens written", { n: r.tokens_out.toLocaleString(LOCALE()) }),
-    r.cost_usd != null && dollars(r.cost_usd), r.host];
+    r.cost_counted != null && (r.cost_estimated ? t("{a} (estimate)", { a: "≈ " + dollars(r.cost_counted) }) : dollars(r.cost_counted)), r.host];
   return out.filter(Boolean).join(" · ");
 }
 
@@ -1296,32 +1362,37 @@ function agentRow(g, redraw) {
     g.ticket && el("a", { href: "#/t/" + g.ticket }, t("Open the ticket {id}", { id: g.ticket })))];
 }
 
-function agentCards(runs) {
+function agentCards(runs, rates) {
   const names = [...new Set(runs.map(r => r.agent))].sort();
   return names.map(name => {
-    const mine = runs.filter(r => r.agent === name), usd = sum(mine, r => r.cost_usd || 0);
+    const mine = runs.filter(r => r.agent === name), usd = sum(mine, r => r.cost_counted || 0), approx = mine.some(r => r.cost_estimated) ? "≈ " : "";
     const lengths = mine.filter(r => r.ended).map(r => r.ended - r.started).sort((a, b) => a - b);
     const models = {};
     for (const r of mine) if (r.model) models[r.model] = (models[r.model] || 0) + 1;
     const model = Object.keys(models).sort((a, b) => models[b] - models[a])[0];
     const failed = mine.filter(r => r.state === "failed").length;
+    const measured = (rates.agents || []).find(a => a.agent === name) || {}, hour = measured.per_hour;
     return el("div", { class: "ag-card" }, agentTag(name),
       el("b", { class: "n" }, tp(mine.length, "{n} run", "{n} runs")),
       el("small", {}, [model, lengths.length && t("median {t}", { t: clock(Math.max(60, lengths[Math.floor(lengths.length / 2)])) })].filter(Boolean).join(" · ")),
-      el("small", {}, [usd > 0 && dollars(usd), failed > 0 && t("{n} failed", { n: failed })].filter(Boolean).join(" · ")));
+      el("small", {}, [usd > 0 && approx + money(usd), failed > 0 && t("{n} failed", { n: failed })].filter(Boolean).join(" · ")),
+      el("small", {}, hour != null ? t("{a} an hour over {n} days", { a: (measured.estimated ? "≈ " : "") + fmt(hour / 100, rates.currency), n: rates.days })
+        : t("Hourly rate: not measured yet")));
   });
 }
 
 async function agentsPage() {
   const path = "api/runs?since=" + (nowSec() - Number(AGENTS.period) * 86400);
-  const runs = live(path, await api(path));
+  const [data, rates] = await Promise.all([api(path), api("api/agent-rates").catch(() => ({ agents: [] }))]);
+  const runs = live(path, data);
   const body = el("div", { class: "agents" });
   const toggle = el("span", { class: "toggle", role: "group", "aria-label": t("Period") }, Object.keys(AGENT_PERIODS).map(v =>
     el("button", { type: "button", "aria-pressed": String(AGENTS.period === v), onclick: () => { AGENTS.period = v; route(); } }, t(AGENT_PERIODS[v]))));
   const redraw = () => {
     const now = runs.filter(going), asked = runs.filter(r => r.state === "waiting").length;
     const closed = runs.filter(r => !going(r) && r.state !== "waiting");
-    const tickets = new Set(closed.map(r => r.ticket).filter(Boolean)).size, usd = sum(runs, r => r.cost_usd || 0);
+    const tickets = new Set(closed.map(r => r.ticket).filter(Boolean)).size, usd = sum(runs, r => r.cost_counted || 0);
+    const approx = runs.some(r => r.cost_estimated) ? "≈ " : "";
     const fact = (label, value) => el("span", { class: "fact" }, el("small", {}, t(label)), el("b", {}, value));
     const work = pieces(runs), shown = AGENTS.all || work.length <= 11 ? work : work.slice(0, 10);
     body.replaceChildren(...[
@@ -1331,7 +1402,7 @@ async function agentsPage() {
           : [el("strong", {}, t("No agent at work"))],
         " ", el("span", {}, AGENTS.period === "1" ? t("in the last 24 hours") : t("in the last {n} days", { n: AGENTS.period }))),
         el("div", { class: "facts" }, fact("Finished", String(closed.length)), fact("Tickets worked", String(tickets)),
-          fact("Waiting for an answer", String(asked)), usd > 0 && fact("Cost", dollars(usd)))),
+          fact("Waiting for an answer", String(asked)), usd > 0 && fact("Cost", approx + money(usd)))),
       runs.length === 0 && el("p", { class: "empty" }, t("No agent reported a run in this period.")),
       now.length > 0 && el("section", {}, el("h2", {}, t("Now")),
         el("div", { class: "ag-now" }, now.slice(0, 6).map(r => el("div", { class: "ag-now-row" },
@@ -1342,7 +1413,7 @@ async function agentsPage() {
         el("div", { class: "ag-list" }, shown.map(g => agentRow(g, redraw)).flat()),
         shown.length < work.length && el("button", { type: "button", class: "quiet more", onclick: () => { AGENTS.all = true; redraw(); } },
           t("Show all ({n})", { n: work.length }))),
-      runs.length > 0 && el("section", {}, el("h2", {}, t("The team")), el("div", { class: "ag-team" }, agentCards(runs)))].filter(Boolean));
+      runs.length > 0 && el("section", {}, el("h2", {}, t("The team")), el("div", { class: "ag-team" }, agentCards(runs, rates)))].filter(Boolean));
   };
   show(el("div", { class: "top" }, el("div", {}, el("h1", {}, t("Agents")),
     el("p", { class: "meta" }, t("What the agents do, how long it takes and what it costs. Each agent reports its runs by itself."))), toggle), body);

@@ -42,6 +42,7 @@ else in one SQLite file.
 | `webhook_secrets_file` | none | File of the secrets that may sign a forge webhook, one `name:secret` per line (same format as `mcp_keys_file`). Without it there is no webhook (`/hooks/git` answers 404). |
 | `agent_hook_url` | none | Address called when a ticket is approved (see [Agent webhook](#agent-webhook)). Without it nothing is called. |
 | `agent_hook_secret_file` | none | File holding the secret that signs those calls, on one line. |
+| `team` | none | The members shown on the team page `/team`: see [Team page](#team-page). Without it the page says that no team is configured. |
 
 An unknown key is reported on the first log lines and ignored.
 
@@ -127,8 +128,9 @@ it), `result` (60 characters at most: "deployed", "3 gaps").
 
 - Send a summary only: never the instruction given to the agent, nor the
   output of a command. Both may hold a secret.
-- An account writes its own runs: a `run_id` reported by another account
-  is refused.
+- An account writes its own runs: the key of a run is the pair (account,
+  `run_id`). Another account that sends the same `run_id` writes a run of
+  its own and never changes this one.
 - A run of a project needs a contributor of that project. Its members see
   it, like its tickets. A run without a project is seen by administrators
   only.
@@ -179,6 +181,78 @@ token is written to the log with the reason, never the token. Written for
 Authelia 4.39: its userinfo carries no audience, so `aud` and `client_id`
 are read in the access token, a JWT (set `access_token_signed_response_alg:
 RS256` on the client), once userinfo has accepted it.
+
+## Currencies and hourly rates
+
+Amounts are shown in one ISO currency. An administrator chooses it in the
+"Currencies" block of the Settings page, with what one dollar is worth in
+each currency (one line per currency: `EUR 0.92`). The first values are
+indicative: adjust them when the rates move. The dollar stays at 1: agents
+cost dollars, as Claude Code counts them.
+
+- Each member gives their own hourly rate and its currency in "My profile".
+  Only the member, the administrators and the owners of their projects see it.
+- The Time page converts each rate to the currency of the page.
+- The hourly rate of an agent is computed, not typed: dollars spent by its
+  runs over the last 30 days, divided by the time of those runs.
+- Nothing is read from the configuration file: the currency and the table
+  live in the database (Settings page, or `POST /api/rates`).
+- A run that reports no cost takes an estimate from its tokens and a table
+  of prices by model (dollars per million tokens: input, output, cache read,
+  cache write for one hour). An administrator sets the table in the same
+  block of the Settings page; it shows the date of its last change. A model
+  that is not in the table has no estimate.
+
+## Team page
+
+`/team` shows the agents (and people) who work on the projects, drawn as
+characters. Each member shows its state at a glance (working, waiting for an
+answer, resting), its current task and for how long. A click opens its sheet:
+on one side what it did (its runs, latest first, with the result of the check
+and the cost), on the other side its queue (the open tickets assigned to it,
+in the order it will take them). The page reads again every 20 seconds.
+"Replay the last 24 hours" plays the runs of the day in one minute.
+
+```mermaid
+flowchart LR
+  A["Agents"] -->|"report_run"| R[("runs")]
+  T[("tickets")] --> Q["GET /api/team<br>queues"]
+  R --> P["GET /api/runs"]
+  Q --> W["/team"]
+  P --> W
+```
+
+The members come from the `team` key of the configuration file:
+
+```json
+"team": {
+  "plan_url": "https://plan.example.org",
+  "groups": [{"id": "core", "title": "Core team", "note": "workstation"}],
+  "members": [
+    {"id": "worker", "name": "Worker", "role": "Does the work", "group": "core", "look": "hardhat",
+     "hue": "#e0803a", "motto": "I do it. Someone else checks it.", "agents": ["worker"], "assignees": ["bot-worker"]}
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `plan_url` | Address of Cairn Plan, for the links to the tickets when the page is served under another host name. |
+| `groups` | Sections of the page, in order: `id`, `title`, optional `note` (shown small next to the title). |
+| `id` | Short name of the member, in the page address (`/team#worker`). |
+| `name`, `role`, `motto` | What the page shows. |
+| `group` | The `id` of its section. |
+| `look` | Its drawing: `conductor`, `hardhat`, `glasses`, `nightcap`, `dog-headset`, `dog-laptop`, `dog-book`, `cairn`, `courier`, `beacon`; any other value: a plain pebble. |
+| `hue` | Its colour, `#rrggbb`. |
+| `agents` | The `agent` names of its runs (`report_run`). |
+| `assignees` | The logins whose open tickets form its queue. |
+| `rest`, `empty_queue` | Optional texts shown when it rests, and when its queue is empty. |
+
+A viewer sees only what Cairn Plan already shows them: the runs and tickets of
+their projects (all of them for an administrator). The page reads the runs of the
+last 7 days, up to 500 (the limit of `GET /api/runs`). To serve the page under its
+own host name, have the proxy rewrite `/` to `/team` for that name; the
+other paths (`team.js`, `api/...`) are the same.
 
 ## Notifications
 

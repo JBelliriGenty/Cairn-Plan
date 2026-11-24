@@ -212,11 +212,29 @@ const DICT = {
     "Which ticket": "Quel ticket", "No time in this period.": "Aucun temps sur cette période.", "Show all ({n})": "Tout afficher ({n})",
     "Person": "Personne", "Project": "Projet", "Total": "Total", "Cost": "Coût", "Tickets": "Tickets",
     "Hourly rates": "Taux horaires", "Currency": "Devise", "Nobody logged time yet.": "Personne n'a encore saisi de temps.",
-    "What an hour of each person costs. The page multiplies it by the time logged. Only administrators and project owners see the amounts. Agents report their own cost.":
-      "Le coût d'une heure de chaque personne. La page le multiplie par le temps saisi. Seuls les administrateurs et les responsables de projet voient les montants. Les agents donnent leur propre coût.",
     "only an administrator can set an hourly rate": "seul un administrateur peut régler un taux horaire",
     "invalid rate": "taux invalide", "invalid currency": "devise invalide",
     "Time · {name}": "Temps · {name}", "{n} project": "{n} projet", "{n} projects": "{n} projets",
+    // money
+    "What an hour of each person costs, in the currency each person chose. The page converts it and multiplies it by the time logged. Only administrators and project owners see the amounts. Agents report their own cost.":
+      "Le coût d'une heure de chaque personne, dans la devise que chacun a choisie. La page la convertit et la multiplie par le temps saisi. Seuls les administrateurs et les responsables de projet voient les montants. Les agents donnent leur propre coût.",
+    "Hourly rate": "Taux horaire", "My hourly rate": "Mon taux horaire",
+    "What an hour of your time costs. The Time page multiplies it by the time you log. Only you, the administrators and the owners of your projects see it.":
+      "Ce que coûte une heure de votre temps. La page Temps la multiplie par le temps que vous saisissez. Seuls vous, les administrateurs et les responsables de vos projets la voient.",
+    "Currencies": "Devises", "Shown in": "Affichés en", "Value of one dollar": "Valeur d'un dollar",
+    "Amounts are shown in this currency. Each member gives their hourly rate in their own currency; agents cost dollars.":
+      "Les montants s'affichent dans cette devise. Chaque membre donne son taux horaire dans sa devise ; les agents coûtent des dollars.",
+    "One currency per line: its code (EUR) and what one dollar is worth in it (0.92). Change the values when the rates move.":
+      "Une devise par ligne : son code (EUR) et ce que vaut un dollar dans cette devise (0.92). Changez les valeurs quand les cours bougent.",
+    "{a} an hour over {n} days": "{a} par heure sur {n} jours",
+    "only an administrator can change the currencies": "seul un administrateur peut changer les devises",
+    "only an administrator can set the hourly rate of someone else": "seul un administrateur peut régler le taux horaire d'une autre personne",
+    "{a} (estimate)": "{a} (estimé)", "Hourly rate: not measured yet": "Taux horaire : pas encore mesuré",
+    "Rates entered on {date}.": "Cours saisis le {date}.", "Rates not entered yet: these are indicative values.": "Cours pas encore saisis : ce sont des valeurs indicatives.",
+    "Price of a million tokens": "Prix d'un million de jetons",
+    "One model per line: its name, then the dollars for a million tokens of input, output, cache read and cache write (1 hour). A run that reports no cost is estimated with it.":
+      "Un modèle par ligne : son nom, puis les dollars pour un million de jetons en entrée, en sortie, en lecture de cache et en écriture de cache (1 heure). Un run qui ne donne pas son coût est estimé avec ce tableau.",
+    "Prices dated {date}, read at {source}.": "Prix du {date}, lus sur {source}.", "invalid prices": "tarifs invalides",
     // agents page
     "24 hours": "24 heures", "No agent at work": "Aucun agent au travail",
     "{n} agent at work": "{n} agent au travail", "{n} agents at work": "{n} agents au travail",
@@ -229,6 +247,28 @@ const DICT = {
     "median {t}": "médiane {t}", "{n} failed": "{n} en échec",
     "What the agents do, how long it takes and what it costs. Each agent reports its runs by itself.":
       "Ce que font les agents, en combien de temps et pour quel coût. Chaque agent envoie lui-même ses exécutions.",
+    // team page (/team)
+    "{n} s": "{n} s", "{n} min": "{n} min", "{n} h": "{n} h", "{n} d": "{n} j",
+    "Working · for {t}": "Au travail · depuis {t}", "No news for {t}": "Sans nouvelles depuis {t}", "Resting": "Au repos",
+    "Last run {t} ago": "Dernière exécution il y a {t}", "No run yet.": "Aucune exécution pour l'instant.",
+    "No team is configured. An administrator lists the members in the \"team\" key of the configuration file.":
+      "Aucune équipe n'est configurée. Un administrateur liste ses membres dans la clé « team » du fichier de configuration.",
+    "Open the sheet": "Ouvrir sa fiche",
+    "{n} member works for you.": "{n} membre travaille pour vous.", "{n} members work for you.": "{n} membres travaillent pour vous.",
+    "<b>{a}</b> working, <b>{b}</b> waiting, <b>{c}</b> resting.": "<b>{a}</b> au travail, <b>{b}</b> en attente, <b>{c}</b> au repos.",
+    "Open a member to see what it did and what it will do.": "Ouvrez un membre pour voir ce qu'il a fait et ce qu'il fera.",
+    "Replay · {t}": "Rejeu · {t}", "Offline": "Hors ligne", "Live · {t}": "Direct · {t}",
+    "{who} starts: {task}": "{who} commence : {task}", "{who} finished: {task}": "{who} a fini : {task}",
+    "No run in the last 7 days.": "Aucune exécution ces 7 derniers jours.", "Nothing in its queue.": "Rien dans sa file.",
+    "{x} per hour over 30 days": "{x} de l'heure sur 30 jours", "Close": "Fermer",
+    "What it did": "Ce qu'il a fait", "Latest first, with the verdict of the check.": "Du plus récent au plus ancien, avec le verdict du contrôle.",
+    "In its queue": "Dans sa file", "What it will take next, in order.": "Ce qu'il prendra ensuite, dans l'ordre.",
+    "Cairn Plan does not answer. The page tries again in 20 seconds.": "Cairn Plan ne répond pas. La page réessaie dans 20 secondes.",
+    "No run in the last 24 hours: nothing to replay.": "Aucune exécution ces dernières 24 heures : rien à rejouer.",
+    "Replay of the last 24 hours, in one minute.": "Rejeu des dernières 24 heures, en une minute.",
+    "Stop the replay": "Arrêter le rejeu", "Replay the last 24 hours": "Rejouer les dernières 24 heures",
+    "Each agent reports its runs to Cairn Plan. The queue lists the open tickets assigned to it. The page reads again every 20 seconds.":
+      "Chaque agent envoie ses exécutions à Cairn Plan. La file liste les tickets ouverts qui lui sont assignés. La page se relit toutes les 20 secondes.",
   },
 };
 

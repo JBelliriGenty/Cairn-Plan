@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.27.1
+
+- A run belongs to the account that reports it: its key is the pair
+  (account, `run_id`). Another account that sends the same `run_id` writes a
+  run of its own and can no longer take an id in advance or touch the run of
+  someone else. The table of runs is rebuilt once at start; the old one is kept
+  as `runs_before_0_27_1`, and nothing is lost.
+- Time page: a total in the currency of the page shows, under the pointer, what
+  it is made of by currency ("800 CHF + 300 € + 9.04 $"), when the amounts come
+  from more than one currency.
+
+## 0.27.0
+
+- Team page `/team`: the agents drawn as characters, their state at a glance
+  (working, waiting, resting), what each one did (runs, results, costs) and
+  what is in its queue (open tickets assigned to it). It reads again every
+  20 seconds; "Replay the last 24 hours" plays the day in one minute. The
+  members come from the new configuration key `team` (docs/configuration.md,
+  "Team page"). New route `GET /api/team`: the members and their queues,
+  limited to what the viewer may see.
+
+## 0.26.1
+
+- A run that reports no cost takes an estimate from its tokens and a
+  table of prices by model (dollars per million tokens: input, output,
+  cache read, cache write). The page shows it with "≈" and "(estimate)". The
+  starting prices were read on the official pricing page on 2026-11-24;
+  an administrator adjusts them in the "Currencies" block of the Settings
+  page, which now has a "Save" button. The table of prices and the table of
+  currencies show the date of their last change.
+- A run that reports its cost for everything it started (a session) loses the
+  estimate of the runs it started, which are counted on their own: a sum over
+  the runs counts nothing twice. Runs have `cost_counted` and `cost_estimated`.
+- MCP `report_run` takes `tokens_cache_read` and `tokens_cache_write` (part of
+  `tokens_in`). Two columns are added to `runs`.
+- The hourly rate of an agent is computed from counted costs, estimates
+  included. A card without a rate says "not measured yet".
+
+## 0.26.0
+
+- Currencies. Amounts are shown in one ISO currency (EUR, USD, CHF, GBP...),
+  chosen by an administrator in the new "Currencies" block of the Settings
+  page, with what one dollar is worth in each currency (a table to adjust
+  when the rates move). The dollar is the pivot: agents cost dollars. A
+  setting that held a sign ("€") reads as its code.
+- Hourly rate of each member. "My profile" has a "My hourly rate" block:
+  the amount and its currency. Only the member, the administrators and the
+  owners of their projects see it. An administrator can still set the rate
+  of someone else from the Time page. The Time page converts every rate to
+  the currency of the page and adds people and agents in one amount.
+- Hourly rate of each agent, computed: the dollars its runs cost over the
+  last 30 days, divided by the time of those runs, in the currency of the
+  page. It shows on the cards of the "Agents" page. The cost of the page
+  is shown in the same currency.
+- API: `GET /api/agent-rates`; `POST /api/rates` takes `rate` and
+  `rate_currency` (the caller, or anyone for an administrator), `currency`
+  and `fx` (administrators); `GET /api/me` has a `money` block. The Time
+  report gives `rates` converted, `rates_own`, `per_usd` and `currencies`.
+- New column `users.rate_currency`, added at start. Nothing is removed.
+
 ## 0.25.0
 
 - Wake-up date: new field "Wake up" of a ticket. Until that day the ticket

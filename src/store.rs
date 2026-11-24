@@ -68,10 +68,11 @@ CREATE TABLE IF NOT EXISTS hook_outbox(
   id INTEGER PRIMARY KEY, ticket INTEGER NOT NULL REFERENCES tickets(id), event TEXT NOT NULL, actor TEXT NOT NULL,
   at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS runs(
-  run_id TEXT PRIMARY KEY, login TEXT NOT NULL, agent TEXT NOT NULL, source TEXT NOT NULL, host TEXT NOT NULL DEFAULT '',
+  run_id TEXT NOT NULL, login TEXT NOT NULL, agent TEXT NOT NULL, source TEXT NOT NULL, host TEXT NOT NULL DEFAULT '',
   project TEXT NOT NULL DEFAULT '', ticket TEXT NOT NULL DEFAULT '', task TEXT NOT NULL, state TEXT NOT NULL,
   model TEXT NOT NULL DEFAULT '', tokens_in INTEGER, tokens_out INTEGER, cost_usd REAL, started INTEGER NOT NULL,
-  ended INTEGER, parent TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '', updated INTEGER NOT NULL);
+  ended INTEGER, parent TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '', updated INTEGER NOT NULL,
+  tokens_cache_read INTEGER, tokens_cache_write INTEGER, PRIMARY KEY(login, run_id));
 CREATE INDEX IF NOT EXISTS runs_started ON runs(started);
 ";
 
@@ -96,6 +97,41 @@ pub fn open(path: &str) -> Connection {
     let _ = c.execute("ALTER TABLE users ADD COLUMN photo INTEGER NOT NULL DEFAULT 0", []);
     // 0.25.0: the day a ticket wakes up; until then it is out of "for me" and no agent takes it
     let _ = c.execute("ALTER TABLE tickets ADD COLUMN wake_date TEXT NOT NULL DEFAULT ''", []);
+    // 0.25.0: the currency of someone's hourly rate (ISO code; empty: the one amounts are shown in)
+    let _ = c.execute("ALTER TABLE users ADD COLUMN rate_currency TEXT NOT NULL DEFAULT ''", []);
+    // 0.26.1: tokens a run read from the cache and wrote to it (part of tokens_in), to estimate what it cost
+    let _ = c.execute("ALTER TABLE runs ADD COLUMN tokens_cache_read INTEGER", []);
+    let _ = c.execute("ALTER TABLE runs ADD COLUMN tokens_cache_write INTEGER", []);
+    // 0.27.1: a run belongs to the account that reports it: (login, run_id) is its key, not run_id alone. A table made
+    // before is rebuilt once; the old one stays, under another name, until someone drops it.
+    let single_key: bool = c
+        .query_row("SELECT sql LIKE '%run_id TEXT PRIMARY KEY%' FROM sqlite_master WHERE type = 'table' AND name = 'runs'", [], |r| r.get(0))
+        .unwrap_or(false);
+    if single_key {
+        // the old table keeps a name that is free: one of an earlier rebuild may still be there
+        let taken: bool = c.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'runs_before_0_27_1'", [], |r| r.get::<_, i64>(0)).unwrap_or(0) > 0;
+        let old_name = if taken { format!("runs_before_0_27_1_{}", now()) } else { "runs_before_0_27_1".to_string() };
+        c.execute_batch(&format!(
+            "BEGIN;
+             ALTER TABLE runs RENAME TO {OLD};
+             DROP INDEX IF EXISTS runs_started;
+             CREATE TABLE runs(
+  run_id TEXT NOT NULL, login TEXT NOT NULL, agent TEXT NOT NULL, source TEXT NOT NULL, host TEXT NOT NULL DEFAULT '',
+  project TEXT NOT NULL DEFAULT '', ticket TEXT NOT NULL DEFAULT '', task TEXT NOT NULL, state TEXT NOT NULL,
+  model TEXT NOT NULL DEFAULT '', tokens_in INTEGER, tokens_out INTEGER, cost_usd REAL, started INTEGER NOT NULL,
+  ended INTEGER, parent TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '', updated INTEGER NOT NULL,
+  tokens_cache_read INTEGER, tokens_cache_write INTEGER, PRIMARY KEY(login, run_id)
+             );
+             INSERT INTO runs({COLS}) SELECT {COLS} FROM {OLD};
+             CREATE INDEX runs_started ON runs(started);
+             COMMIT;",
+            OLD = old_name,
+            COLS = "run_id, login, agent, source, host, project, ticket, task, state, model, tokens_in, tokens_out, cost_usd, started, ended, parent, result, updated, tokens_cache_read, tokens_cache_write"
+        ))
+        .expect("cannot rebuild the table of runs");
+    }
+    // a rate without a currency was given in the one amounts are shown in: written down, so that a change of that currency leaves it alone
+    let _ = c.execute("UPDATE users SET rate_currency = ?1 WHERE rate > 0 AND rate_currency = ''", params![display_currency(&c)]);
     c
 }
 
@@ -841,6 +877,187 @@ fn reported_usd(body: &str) -> Option<f64> {
     value.trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0)
 }
 
+/* ---------- currencies and hourly rates ---------- */
+
+/// Value of one dollar in each currency, when the settings give no table: indicative figures
+/// of 2026-11, to be adjusted in the settings ("fx"). The dollar is the pivot: agents cost dollars.
+const DEFAULT_FX: [(&str, f64); 7] =
+    [("USD", 1.0), ("EUR", 0.92), ("GBP", 0.79), ("CHF", 0.88), ("CAD", 1.37), ("AUD", 1.52), ("JPY", 150.0)];
+
+/// An ISO 4217 code: three capital letters.
+pub fn valid_iso(s: &str) -> bool {
+    s.len() == 3 && s.bytes().all(|b| b.is_ascii_uppercase())
+}
+
+/// What one dollar is worth in each currency: the table saved in the settings, else the default one.
+pub fn fx_table(c: &Connection) -> std::collections::BTreeMap<String, f64> {
+    let saved: Option<std::collections::BTreeMap<String, f64>> = settings(c).get("fx").and_then(|v| serde_json::from_str(v).ok());
+    saved.filter(|t| !t.is_empty()).unwrap_or_else(|| DEFAULT_FX.iter().map(|(k, v)| (k.to_string(), *v)).collect())
+}
+
+/// The currency amounts are shown in. An old setting held a sign ("€"): it reads as its code.
+pub fn display_currency(c: &Connection) -> String {
+    match settings(c).remove("currency").unwrap_or_default().as_str() {
+        "$" => "USD".to_string(),
+        "£" => "GBP".to_string(),
+        s if valid_iso(s) => s.to_string(),
+        _ => "EUR".to_string(), // empty, "€", or anything else
+    }
+}
+
+/// An amount in `from` expressed in `to`, through the dollar; unchanged when a code is not in the table.
+pub fn convert(fx: &std::collections::BTreeMap<String, f64>, amount: f64, from: &str, to: &str) -> f64 {
+    match (fx.get(from), fx.get(to)) {
+        (Some(f), Some(t)) if from != to => amount / f * t,
+        _ => amount,
+    }
+}
+
+/// What someone sees of money in /api/me: the currency of the page, the table, and their own hourly
+/// rate (cents, in its currency: theirs, else the one of the page).
+pub fn my_money(c: &Connection, login: &str) -> Value {
+    let fx = fx_table(c);
+    let currency = display_currency(c);
+    let (rate, own): (i64, String) = c
+        .query_row("SELECT rate, rate_currency FROM users WHERE login = ?1", params![login], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap_or((0, String::new()));
+    json!({
+        "currency": currency, "fx": fx, "currencies": fx.keys().collect::<Vec<_>>(),
+        "rate": rate, "rate_currency": if own.is_empty() { currency.clone() } else { own },
+        "fx_date": settings(c).get("fx_date").cloned().unwrap_or_default(),
+        "prices": prices_table(c), "prices_source": PRICES_SOURCE,
+        "prices_date": settings(c).get("prices_date").cloned().unwrap_or_else(|| DEFAULT_PRICES_DATE.to_string()),
+    })
+}
+
+/// What a million tokens cost each model, in dollars: [input, output, cache read, cache write (1 hour)].
+/// Read on the official pricing page on 2026-11-24 (PRICES_SOURCE); an administrator adjusts them in the settings.
+/// Claude Code writes its cache for one hour. Haiku has a dearer tier above 100 000 tokens of prompt: not counted here.
+const DEFAULT_PRICES: [(&str, [f64; 4]); 4] = [
+    ("claude-fable-5-2", [8.0, 40.0, 0.2, 16.0]),
+    ("claude-opus-5-5", [4.0, 20.0, 0.2, 8.0]),
+    ("claude-sonnet-5-5", [2.0, 10.0, 0.1, 4.0]),
+    ("claude-haiku-5-5", [0.1, 0.5, 0.01, 0.2]),
+];
+const DEFAULT_PRICES_DATE: &str = "2026-11-24";
+pub const PRICES_SOURCE: &str = "https://platform.claude.com/docs/en/about-claude/pricing";
+
+/// A date "YYYY-MM-DD" (UTC) from seconds since 1970 (Howard Hinnant's civil-from-days).
+fn date_of(secs: i64) -> String {
+    let z = secs.div_euclid(86_400) + 719_468;
+    let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    format!("{:04}-{:02}-{:02}", yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// The table of prices by model: the one saved in the settings, else the default one.
+pub fn prices_table(c: &Connection) -> std::collections::BTreeMap<String, [f64; 4]> {
+    let saved: Option<std::collections::BTreeMap<String, [f64; 4]>> = settings(c).get("prices").and_then(|v| serde_json::from_str(v).ok());
+    saved.unwrap_or_else(|| DEFAULT_PRICES.iter().map(|(k, v)| (k.to_string(), *v)).collect())
+}
+
+/// What a run cost in dollars from its tokens, when its model is in the table and it has tokens.
+fn estimate(prices: &std::collections::BTreeMap<String, [f64; 4]>, r: &Value) -> Option<f64> {
+    let model = r["model"].as_str().filter(|m| !m.is_empty())?;
+    let p = prices.get(model).or_else(|| prices.iter().filter(|(k, _)| model.starts_with(k.as_str())).max_by_key(|(k, _)| k.len()).map(|(_, p)| p))?;
+    let (tin, tout) = (r["tokens_in"].as_i64(), r["tokens_out"].as_i64());
+    if tin.is_none() && tout.is_none() {
+        return None;
+    }
+    let (tin, tout) = (tin.unwrap_or(0), tout.unwrap_or(0));
+    let (read, write) = (r["tokens_cache_read"].as_i64().unwrap_or(0), r["tokens_cache_write"].as_i64().unwrap_or(0));
+    let plain = (tin - read - write).max(0);
+    Some((plain as f64 * p[0] + tout as f64 * p[1] + read as f64 * p[2] + write as f64 * p[3]) / 1e6)
+}
+
+/// Adds to each run what it counts for: "cost_counted" (dollars, null when unknown) and
+/// "cost_estimated" (true when it comes from tokens, not from what the source reported). A run that
+/// reports no cost takes an estimate. A run that reports one (a session: everything it started
+/// included) loses the estimates of the runs it started, which are counted on their own: a sum
+/// over the runs counts nothing twice.
+pub fn with_costs(c: &Connection, runs: &mut [Value]) {
+    let prices = prices_table(c);
+    let est: Vec<Option<f64>> = runs.iter().map(|r| if r["cost_usd"].is_null() { estimate(&prices, r) } else { None }).collect();
+    let mut kids: std::collections::HashMap<String, f64> = Default::default();
+    for (r, e) in runs.iter().zip(&est) {
+        if let (Some(e), Some(parent)) = (e, r["parent"].as_str().filter(|p| !p.is_empty())) {
+            *kids.entry(format!("{}\0{parent}", r["login"].as_str().unwrap_or(""))).or_default() += e;
+        }
+    }
+    for (r, e) in runs.iter_mut().zip(est) {
+        let (counted, estimated) = match (r["cost_usd"].as_f64(), e) {
+            (Some(raw), _) => {
+                let key = format!("{}\0{}", r["login"].as_str().unwrap_or(""), r["run_id"].as_str().unwrap_or(""));
+                let k = kids.get(&key).copied().unwrap_or(0.0);
+                (Some((raw - k).max(0.0)), k > 0.0)
+            }
+            (None, Some(e)) => (Some(e), true),
+            _ => (None, false),
+        };
+        r["cost_counted"] = json!(counted);
+        r["cost_estimated"] = json!(estimated);
+    }
+}
+
+/// The team page (configuration key "team"): its groups and members as
+/// configured, each member with its queue: the open tickets assigned to one
+/// of its "assignees" that the viewer can see, in the order they will be
+/// taken (in progress, to do, waiting; oldest first). Runs come from /api/runs.
+pub fn team(c: &Connection, a: &Actor, cfg: &Value) -> R<Value> {
+    let mut st = db(c.prepare(
+        "SELECT p.key || '-' || t.number, t.title, t.state, t.priority, t.assignee, t.updated
+         FROM tickets t JOIN projects p ON p.id = t.project
+         WHERE t.state IN ('in_progress', 'todo', 'waiting') AND (t.wake_date = '' OR t.wake_date <= date('now'))
+           AND t.assignee != '' AND t.assignee IN (SELECT value FROM json_each(?1))
+           AND (?2 OR p.id IN (SELECT project FROM members WHERE login = ?3))
+         ORDER BY CASE t.state WHEN 'in_progress' THEN 0 WHEN 'todo' THEN 1 ELSE 2 END, t.updated, t.id LIMIT 12",
+    ))?;
+    let mut members = Vec::new();
+    for m in cfg["members"].as_array().into_iter().flatten() {
+        let logins = json!(m["assignees"].as_array().cloned().unwrap_or_default()).to_string();
+        let rows = db(st.query_map(params![logins, a.admin, a.login], |r| {
+            Ok(json!({
+                "id": r.get::<_, String>(0)?, "title": r.get::<_, String>(1)?, "state": r.get::<_, String>(2)?,
+                "priority": r.get::<_, String>(3)?, "assignee": r.get::<_, String>(4)?, "updated": r.get::<_, i64>(5)?,
+            }))
+        }))?;
+        let mut m = m.clone();
+        m["queue"] = Value::Array(db(rows.collect())?);
+        members.push(m);
+    }
+    Ok(json!({"groups": cfg["groups"].as_array().cloned().unwrap_or_default(), "members": members, "plan_url": cfg["plan_url"].as_str().unwrap_or("")}))
+}
+
+/// What an hour of each agent costs, over the last 30 days, from the runs it reported with a cost:
+/// dollars spent over the time of those runs, shown in the currency of the page. Only the runs
+/// someone may see count. "per_hour" (cents) is left out under a minute of work.
+pub fn agent_rates(c: &Connection, a: &Actor) -> R<Value> {
+    const DAYS: i64 = 30;
+    let (fx, currency) = (fx_table(c), display_currency(c));
+    let per_usd = fx.get(&currency).copied().unwrap_or(1.0);
+    let mut runs = load_runs(c, a, now() - DAYS * 86400, "", "", 100_000)?;
+    with_costs(c, &mut runs);
+    // agent -> (runs, dollars, seconds, whether an estimate is in it)
+    let mut by: std::collections::BTreeMap<String, (i64, f64, i64, bool)> = Default::default();
+    for r in &runs {
+        let (Some(usd), Some(ended)) = (r["cost_counted"].as_f64().filter(|u| *u > 0.0), r["ended"].as_i64()) else { continue };
+        let e = by.entry(r["agent"].as_str().unwrap_or("").to_string()).or_default();
+        *e = (e.0 + 1, e.1 + usd, e.2 + (ended - r["started"].as_i64().unwrap_or(ended)).max(0), e.3 || r["cost_estimated"] == true);
+    }
+    let agents: Vec<Value> = by
+        .into_iter()
+        .map(|(agent, (n, usd, secs, estimated))| {
+            let per_hour = if secs >= 60 { json!((usd / (secs as f64 / 3600.0) * per_usd * 100.0).round() as i64) } else { Value::Null };
+            json!({"agent": agent, "runs": n, "usd": usd, "hours": secs as f64 / 3600.0, "per_hour": per_hour, "estimated": estimated})
+        })
+        .collect();
+    Ok(json!({"currency": currency, "days": DAYS, "agents": agents}))
+}
+
 /// Time of a project or of a space, for the "Time" page: each ticket with
 /// its clock (seconds per state, when it was closed) and the cost its
 /// agents reported, then each entry of logged time. The page adds them up
@@ -933,50 +1150,136 @@ pub fn time_report(c: &Connection, a: &Actor, scope: Scope, agents: &[String]) -
     let mut agents: Vec<&String> = agents.iter().collect();
     agents.sort();
     agents.dedup();
-    let mut rates = serde_json::Map::new();
+    // "rates": cents an hour in the currency of the page; "rates_own": as each person gave it
+    let (mut rates, mut own) = (serde_json::Map::new(), serde_json::Map::new());
+    let (fx, currency) = (fx_table(c), display_currency(c));
     if money {
-        let mut st = db(c.prepare("SELECT login, rate FROM users WHERE rate > 0"))?;
-        for row in db(st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))))? {
-            let (login, rate) = db(row)?;
-            rates.insert(login, json!(rate));
+        let mut st = db(c.prepare("SELECT login, rate, rate_currency FROM users WHERE rate > 0"))?;
+        for row in db(st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))))? {
+            let (login, rate, cur) = db(row)?;
+            let cur = if cur.is_empty() { currency.clone() } else { cur };
+            rates.insert(login.clone(), json!(convert(&fx, rate as f64, &cur, &currency).round() as i64));
+            own.insert(login, json!({"rate": rate, "currency": cur}));
         }
     }
-    let currency = settings(c).remove("currency").filter(|v| !v.is_empty()).unwrap_or_else(|| "€".to_string());
     Ok(json!({
         "scope": kind, "name": name, "space": space, "now": now, "agents": agents,
-        "money": money, "rates": rates, "currency": currency,
+        "money": money, "rates": rates, "rates_own": own, "currency": currency, "per_usd": fx.get(&currency).copied().unwrap_or(1.0),
+        "currencies": fx.keys().collect::<Vec<_>>(),
         "projects": projects.iter().map(|(_, key, name)| json!({ "key": key, "name": name })).collect::<Vec<_>>(),
         "tickets": tickets, "work": work, "costs": costs,
     }))
 }
 
-/// {"login": "lea", "rate": 6500} sets what an hour of someone costs, in cents
-/// (0: not set); {"currency": "€"} sets the sign shown after an amount. For
-/// an administrator.
+/// Money settings and hourly rates. {"rate": 6500} sets what an hour of the caller costs, in
+/// cents; with "login" of someone else, for an administrator only. {"rate_currency": "CHF"} gives
+/// the currency of that rate (the page currency when never set). {"currency": "EUR"} sets the
+/// currency amounts are shown in, and {"fx": {"EUR": 0.92, ...}} what one dollar is worth in each
+/// currency (the table is replaced, the dollar stays 1): both for an administrator.
 pub fn set_rate(c: &Connection, a: &Actor, v: &Value) -> R<Value> {
-    if !a.admin {
-        return denied("only an administrator can set an hourly rate");
+    let save = |key: &str, val: &str| db(c.execute("INSERT INTO settings(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2", params![key, val]));
+    let (money_given, rate_given) =
+        (v["fx"].is_object() || v["prices"].is_object() || text(v, "currency").is_some(), !v["rate"].is_null() || v["rate_currency"].is_string());
+    if !money_given && !rate_given {
+        return bad("invalid request");
     }
-    if let Some(currency) = text(v, "currency") {
-        if currency.is_empty() || currency.chars().count() > 8 || currency.chars().any(char::is_control) {
+    // everything is checked before anything is written; the table as it will be is the one the checks use
+    let mut table = fx_table(c);
+    let mut new_fx = None;
+    if money_given {
+        if !a.admin {
+            return denied("only an administrator can change the currencies");
+        }
+        if let Some(given) = v["fx"].as_object() {
+            let mut fx = std::collections::BTreeMap::new();
+            for (code, n) in given {
+                let n = n.as_f64().filter(|n| n.is_finite() && *n > 0.0 && *n <= 1_000_000.0);
+                match n {
+                    Some(n) if valid_iso(code) => fx.insert(code.clone(), n),
+                    _ => return bad("invalid currency"),
+                };
+            }
+            fx.insert("USD".to_string(), 1.0);
+            if fx.len() > 40 {
+                return bad("invalid currency");
+            }
+            table = fx.clone();
+            new_fx = Some(fx);
+        }
+        let mut new_prices = None;
+        if let Some(given) = v["prices"].as_object() {
+            let mut table = std::collections::BTreeMap::new();
+            for (model, p) in given {
+                let p: Option<Vec<f64>> = p.as_array().filter(|p| p.len() == 4).and_then(|p| p.iter().map(|n| n.as_f64().filter(|n| n.is_finite() && (0.0..=10_000.0).contains(n))).collect());
+                match p {
+                    Some(p) if (1..=60).contains(&model.len()) && model.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b)) => {
+                        table.insert(model.clone(), [p[0], p[1], p[2], p[3]]);
+                    }
+                    _ => return bad("invalid prices"),
+                };
+            }
+            if table.is_empty() || table.len() > 30 {
+                return bad("invalid prices");
+            }
+            new_prices = Some(table);
+        }
+        let display = text(v, "currency").unwrap_or_else(|| display_currency(c));
+        if !valid_iso(&display) || !table.contains_key(&display) {
             return bad("invalid currency");
         }
-        db(c.execute(
-            "INSERT INTO settings(key, value) VALUES ('currency', ?1) ON CONFLICT(key) DO UPDATE SET value = ?1",
-            params![currency],
-        ))?;
+        // a currency someone's rate is given in, or the one amounts are shown in, cannot leave the table:
+        // its amounts would be counted as if they were in another currency
+        let mut st = db(c.prepare("SELECT DISTINCT rate_currency FROM users WHERE rate > 0 AND rate_currency != ''"))?;
+        let in_use = db(st.query_map([], |r| r.get::<_, String>(0)))?;
+        for cur in in_use {
+            if !table.contains_key(&db(cur)?) {
+                return bad("a currency in use cannot leave the table");
+            }
+        }
+        if let Some(fx) = new_fx {
+            if fx != fx_table(c) {  // the date is the one of the last change of the table
+                save("fx", &serde_json::to_string(&fx).unwrap_or_default())?;
+                save("fx_date", &date_of(now()))?;
+            }
+        }
+        if let Some(table) = new_prices {
+            if table != prices_table(c) {
+                save("prices", &serde_json::to_string(&table).unwrap_or_default())?;
+                save("prices_date", &date_of(now()))?;
+            }
+        }
+        if text(v, "currency").is_some() {
+            save("currency", &display)?;
+        }
     }
-    if let Some(login) = text(v, "login") {
-        let rate = v["rate"].as_i64().unwrap_or(-1);
+    if rate_given {
+        let login = text(v, "login").unwrap_or_else(|| a.login.clone());
+        if login != a.login && !a.admin {
+            return denied("only an administrator can set the hourly rate of someone else");
+        }
+        let rate = if v["rate"].is_null() { None } else { Some(v["rate"].as_i64().unwrap_or(-1)) };
         // a million cents: ten thousand an hour at most
-        if !(0..=1_000_000).contains(&rate) {
+        if rate.is_some_and(|r| !(0..=1_000_000).contains(&r)) {
             return bad("invalid rate");
         }
-        if db(c.execute("UPDATE users SET rate = ?1 WHERE login = ?2", params![rate, login]))? == 0 {
+        let currency = text(v, "rate_currency");
+        if currency.as_ref().is_some_and(|cur| !table.contains_key(cur)) {
+            return bad("invalid currency");
+        }
+        let mut found = 0;
+        if let Some(rate) = rate {
+            found = db(c.execute("UPDATE users SET rate = ?1 WHERE login = ?2", params![rate, login]))?;
+        }
+        match currency {
+            Some(cur) => found = db(c.execute("UPDATE users SET rate_currency = ?1 WHERE login = ?2", params![cur, login]))?,
+            // a rate without a currency is in the one amounts are shown in today: written down, so that it stays so
+            None => {
+                db(c.execute("UPDATE users SET rate_currency = ?1 WHERE login = ?2 AND rate_currency = ''", params![display_currency(c), login]))?;
+            }
+        }
+        if found == 0 {
             return Err((404, "no such person".into()));
         }
-    } else if !v["currency"].is_string() {
-        return bad("invalid request");
     }
     Ok(json!({ "ok": true }))
 }
@@ -1296,11 +1599,11 @@ pub fn search(c: &Connection, a: &Actor, q: &str, key: &str) -> R<Value> {
 
 const RUN_STATES: [&str; 4] = ["running", "ok", "failed", "waiting"];
 const RUN_COLS: &str = "run_id, login, agent, source, host, project, ticket, task, state, model, tokens_in, tokens_out, cost_usd, \
-                        started, ended, parent, result, updated";
+                        started, ended, parent, result, updated, tokens_cache_read, tokens_cache_write";
 /// Fields a client may send, besides "run_id"; what a later send leaves out is kept.
-const RUN_FIELDS: [&str; 15] = [
+const RUN_FIELDS: [&str; 17] = [
     "agent", "source", "host", "project", "ticket", "task", "state", "model", "tokens_in", "tokens_out", "cost_usd", "started", "ended",
-    "parent", "result",
+    "parent", "result", "tokens_cache_read", "tokens_cache_write",
 ];
 
 fn run_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
@@ -1311,6 +1614,7 @@ fn run_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
         "model": r.get::<_, String>(9)?, "tokens_in": r.get::<_, Option<i64>>(10)?, "tokens_out": r.get::<_, Option<i64>>(11)?,
         "cost_usd": r.get::<_, Option<f64>>(12)?, "started": r.get::<_, i64>(13)?, "ended": r.get::<_, Option<i64>>(14)?,
         "parent": r.get::<_, String>(15)?, "result": r.get::<_, String>(16)?, "updated": r.get::<_, i64>(17)?,
+        "tokens_cache_read": r.get::<_, Option<i64>>(18)?, "tokens_cache_write": r.get::<_, Option<i64>>(19)?,
     }))
 }
 
@@ -1335,18 +1639,15 @@ fn run_text(m: &Value, key: &str, max: usize, required: bool) -> R<String> {
 }
 
 /// An account reports a run of its own. A second report of the same
-/// "run_id" updates it (what the new report leaves out is kept); one made by
-/// another account is refused. Only a summary: never the instruction nor the
+/// "run_id" by the same account updates it (what the new report leaves out is
+/// kept); another account's run_id is another run, never touched. Only a summary: never the instruction nor the
 /// output of the agent, which may hold a secret. A run of a project is
 /// reported by one of its contributors; the project is read from the ticket
 /// when it is not given.
 pub fn report_run(c: &Connection, a: &Actor, v: &Value) -> R<Value> {
     let run_id = run_text(v, "run_id", 100, true)?;
     let old: Option<Value> =
-        db(c.query_row(&format!("SELECT {RUN_COLS} FROM runs WHERE run_id = ?1"), params![run_id], run_json).optional())?;
-    if old.as_ref().is_some_and(|o| o["login"] != a.login.as_str()) {
-        return denied("this run was reported by another account");
-    }
+        db(c.query_row(&format!("SELECT {RUN_COLS} FROM runs WHERE run_id = ?1 AND login = ?2"), params![run_id, a.login], run_json).optional())?;
     let mut m = old.unwrap_or_else(|| json!({}));
     for k in RUN_FIELDS {
         if !v[k].is_null() {
@@ -1390,6 +1691,7 @@ pub fn report_run(c: &Connection, a: &Actor, v: &Value) -> R<Value> {
         }
     };
     let (tokens_in, tokens_out) = (int("tokens_in", 1_000_000_000_000)?, int("tokens_out", 1_000_000_000_000)?);
+    let (cache_read, cache_write) = (int("tokens_cache_read", 1_000_000_000_000)?, int("tokens_cache_write", 1_000_000_000_000)?);
     let cost = match &m["cost_usd"] {
         Value::Null => None,
         n => Some(n.as_f64().filter(|n| (0.0..=1_000_000.0).contains(n)).ok_or((400, "cost_usd: a number, 0 to 1000000".to_string()))?),
@@ -1406,13 +1708,14 @@ pub fn report_run(c: &Connection, a: &Actor, v: &Value) -> R<Value> {
     }
     db(c.execute(
         &format!(
-            "INSERT INTO runs({RUN_COLS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
-             ON CONFLICT(run_id) DO UPDATE SET agent=?3, source=?4, host=?5, project=?6, ticket=?7, task=?8, state=?9, model=?10,
-               tokens_in=?11, tokens_out=?12, cost_usd=?13, started=?14, ended=?15, parent=?16, result=?17, updated=?18"
+            "INSERT INTO runs({RUN_COLS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
+             ON CONFLICT(login, run_id) DO UPDATE SET agent=?3, source=?4, host=?5, project=?6, ticket=?7, task=?8, state=?9, model=?10,
+               tokens_in=?11, tokens_out=?12, cost_usd=?13, started=?14, ended=?15, parent=?16, result=?17, updated=?18,
+               tokens_cache_read=?19, tokens_cache_write=?20"
         ),
-        params![run_id, a.login, agent, source, host, project, ticket, task, state, model, tokens_in, tokens_out, cost, started, ended, parent, result, now()],
+        params![run_id, a.login, agent, source, host, project, ticket, task, state, model, tokens_in, tokens_out, cost, started, ended, parent, result, now(), cache_read, cache_write],
     ))?;
-    db(c.query_row(&format!("SELECT {RUN_COLS} FROM runs WHERE run_id = ?1"), params![run_id], run_json))
+    db(c.query_row(&format!("SELECT {RUN_COLS} FROM runs WHERE run_id = ?1 AND login = ?2"), params![run_id, a.login], run_json))
 }
 
 /// The runs someone may see, newest first, 500 at most: those of the
@@ -1426,15 +1729,21 @@ pub fn runs(c: &Connection, a: &Actor, since: &str, agent: &str, project: &str) 
         s if s.bytes().all(|b| b.is_ascii_digit()) => s.parse().map_err(|_| (400, "since: a date or seconds".to_string()))?,
         s => epoch(s).map(|e| e - 43_200).ok_or((400, "since: a date YYYY-MM-DD or seconds".to_string()))?,
     };
+    let mut found = load_runs(c, a, since, agent, project, 500)?;
+    with_costs(c, &mut found);
+    Ok(Value::Array(found))
+}
+
+fn load_runs(c: &Connection, a: &Actor, since: i64, agent: &str, project: &str, limit: i64) -> R<Vec<Value>> {
     let mut st = db(c.prepare(&format!(
         "SELECT {RUN_COLS} FROM runs
          WHERE COALESCE(ended, updated) >= ?1 AND (?2 = '' OR agent = ?2) AND (?3 = '' OR project = ?3)
            AND (?4 OR (project != '' AND project IN
                 (SELECT p.key FROM projects p JOIN members m ON m.project = p.id WHERE m.login = ?5)))
-         ORDER BY started DESC, run_id LIMIT 500"
+         ORDER BY started DESC, run_id LIMIT ?6"
     )))?;
-    let rows = db(st.query_map(params![since, agent, project, a.admin, a.login], run_json))?;
-    Ok(Value::Array(db(rows.collect())?))
+    let rows = db(st.query_map(params![since, agent, project, a.admin, a.login, limit], run_json))?;
+    db(rows.collect())
 }
 
 /* ---------- copies ---------- */
@@ -2259,7 +2568,7 @@ mod tests {
 
         // hourly rates: set by an administrator, shown to an owner of the project, not to a contributor
         seen(&c, "lea", "Lea", "");
-        assert!(set_rate(&c, &lea, &json!({"login": "lea", "rate": 6500})).is_err());
+        assert!(set_rate(&c, &lea, &json!({"login": "jane", "rate": 1})).is_err());
         assert!(set_rate(&c, &jane, &json!({"login": "lea", "rate": -1})).is_err());
         assert!(set_rate(&c, &jane, &json!({"login": "nobody", "rate": 10})).is_err());
         set_rate(&c, &jane, &json!({"login": "lea", "rate": 6500, "currency": "CHF"})).unwrap();
@@ -2404,12 +2713,16 @@ mod tests {
         let c = setup();
         let (lea, tom, eve) = (who("lea", false), who("tom", false), who("eve", false));
         report_run(&c, &lea, &run("r1")).unwrap();
-        // another account, even a member or an administrator, cannot write that run
-        for other in [&tom, &eve, &who("jane", true)] {
-            let r = report_run(&c, other, &json!({"run_id": "r1", "state": "ok", "ended": 2000}));
-            assert_eq!(r.unwrap_err().0, 403, "{}", other.login);
-        }
-        assert_eq!(runs(&c, &lea, "", "", "").unwrap()[0]["state"], "running");
+        // another account sending the same run_id writes a run of its own, never lea's
+        let jane = who("jane", true);
+        let theirs = report_run(&c, &jane, &json!({"run_id": "r1", "agent": "x", "source": "claude-code", "task": "t", "state": "ok", "started": 1000, "ended": 2000})).unwrap();
+        assert_eq!((theirs["login"].as_str(), theirs["state"].as_str()), (Some("jane"), Some("ok")));
+        // an update by the other account without the required fields finds nothing of lea's to complete
+        assert!(report_run(&c, &tom, &json!({"run_id": "r1", "state": "ok", "ended": 2000})).is_err());
+        let all = runs(&c, &jane, "", "", "").unwrap();
+        let lea_run = all.as_array().unwrap().iter().find(|r| r["login"] == "lea").unwrap();
+        assert_eq!((lea_run["state"].as_str(), lea_run["agent"].as_str()), (Some("running"), Some("ouvrier")));
+        assert_eq!(all.as_array().unwrap().len(), 2);
         // a reader or an outsider cannot report for the project either
         assert_eq!(report_run(&c, &tom, &run("r3")).unwrap_err().0, 403);
         assert_eq!(report_run(&c, &eve, &run("r4")).unwrap_err().0, 404);
@@ -2470,5 +2783,217 @@ mod tests {
         let mut r = run("r2");
         r["task"] = json!("é".repeat(120));
         report_run(&c, &lea, &r).unwrap();
+    }
+    #[test]
+    fn money_is_counted_in_one_currency_through_the_dollar() {
+        let c = setup();
+        let (jane, lea) = (who("jane", true), who("lea", false));
+        seen(&c, "lea", "Lea", "");
+        // before any setting: the euro, and a table of indicative rates; an old sign reads as its code
+        assert_eq!(display_currency(&c), "EUR");
+        c.execute("INSERT INTO settings(key, value) VALUES ('currency', '$')", []).unwrap();
+        assert_eq!(display_currency(&c), "USD");
+        c.execute("DELETE FROM settings WHERE key = 'currency'", []).unwrap();
+        let fx = fx_table(&c);
+        assert!((convert(&fx, 92.0, "EUR", "USD") - 100.0).abs() < 1e-9 && (convert(&fx, 100.0, "USD", "CHF") - 88.0).abs() < 1e-9);
+        assert_eq!(convert(&fx, 5.0, "EUR", "EUR"), 5.0);
+        assert_eq!(convert(&fx, 5.0, "XXX", "EUR"), 5.0); // unknown: left as it is
+        // the table and the page currency: for an administrator, checked
+        assert!(set_rate(&c, &lea, &json!({"currency": "USD"})).is_err());
+        assert!(set_rate(&c, &lea, &json!({"fx": {"EUR": 0.9}})).is_err());
+        assert!(set_rate(&c, &jane, &json!({"currency": "ZZZ"})).is_err()); // not in the table
+        assert!(set_rate(&c, &jane, &json!({"currency": "€"})).is_err());
+        assert!(set_rate(&c, &jane, &json!({"fx": {"EUR": 0}})).is_err());
+        assert!(set_rate(&c, &jane, &json!({"fx": {"euro": 0.9}})).is_err());
+        set_rate(&c, &jane, &json!({"fx": {"EUR": 0.5, "SEK": 10.0}, "currency": "SEK"})).unwrap();
+        let fx = fx_table(&c);
+        assert_eq!((fx.get("USD").copied(), fx.get("EUR").copied(), fx.contains_key("CHF"), display_currency(&c).as_str()), (Some(1.0), Some(0.5), false, "SEK"));
+        // each person gives their own rate, in their own currency; nobody sets someone else's but an administrator
+        assert!(set_rate(&c, &lea, &json!({"rate": 5000, "rate_currency": "CHF"})).is_err()); // CHF left the table
+        set_rate(&c, &lea, &json!({"rate": 5000, "rate_currency": "EUR"})).unwrap();
+        assert!(set_rate(&c, &lea, &json!({"login": "jane", "rate": 1})).is_err());
+        assert!(set_rate(&c, &lea, &json!({"rate": -5})).is_err());
+        assert_eq!(set_rate(&c, &jane, &json!({"login": "nobody", "rate": 1})).unwrap_err().0, 404);
+        let m = my_money(&c, "lea");
+        assert_eq!((m["rate"].as_i64(), m["rate_currency"].as_str(), m["currency"].as_str()), (Some(5000), Some("EUR"), Some("SEK")));
+        // the Time page gets the rate in the currency of the page: 50 EUR = 100 USD at 0.5 = 1000 SEK
+        let p = time_report(&c, &jane, Scope::Project("SHOP"), &[]).unwrap();
+        assert_eq!((p["rates"]["lea"].as_i64(), p["rates_own"]["lea"]["currency"].as_str(), p["currency"].as_str()), (Some(100_000), Some("EUR"), Some("SEK")));
+        assert_eq!(p["per_usd"].as_f64(), Some(10.0));
+    }
+
+    #[test]
+    fn an_agent_hourly_rate_comes_from_what_its_runs_cost() {
+        let c = setup();
+        let (jane, lea, eve) = (who("jane", true), who("lea", false), who("eve", false));
+        let at = now() - 3600;
+        let run = |id: &str, agent: &str, secs: i64, usd: f64| {
+            report_run(&c, &lea, &json!({"run_id": id, "agent": agent, "source": "claude-code", "task": "t", "state": "ok", "started": at,
+                                         "ended": at + secs, "cost_usd": usd, "ticket": "SHOP-1"}))
+                .unwrap();
+        };
+        run("a", "ouvrier", 600, 1.0);
+        run("b", "ouvrier", 1800, 2.0); // 3 dollars in 40 minutes: 4.5 an hour
+        run("c", "controleur", 30, 0.5); // under a minute: no rate
+        report_run(&c, &lea, &json!({"run_id": "d", "agent": "ouvrier", "source": "claude-code", "task": "t", "state": "ok", "started": at, "ended": at + 60})).unwrap(); // no cost: not counted
+        let r = agent_rates(&c, &jane).unwrap();
+        assert_eq!((r["currency"].as_str(), r["days"].as_i64()), (Some("EUR"), Some(30)));
+        let by = |name: &str| r["agents"].as_array().unwrap().iter().find(|a| a["agent"] == name).cloned().unwrap();
+        // 4.5 dollars an hour at 0.92 euros per dollar = 4.14 euros: 414 cents
+        assert_eq!((by("ouvrier")["runs"].as_i64(), by("ouvrier")["per_hour"].as_i64()), (Some(2), Some(414)));
+        assert_eq!(by("controleur")["per_hour"], Value::Null);
+        // read like the runs: a member sees their projects, an outsider nothing
+        assert_eq!(agent_rates(&c, &lea).unwrap()["agents"].as_array().unwrap().len(), 2);
+        assert!(agent_rates(&c, &eve).unwrap()["agents"].as_array().unwrap().is_empty());
+    }
+    #[test]
+    fn a_rate_keeps_its_currency_when_the_page_currency_changes() {
+        let c = setup();
+        let (jane, lea) = (who("jane", true), who("lea", false));
+        seen(&c, "lea", "Lea", "");
+        // a rate given before the currency column: it was in the currency shown then
+        c.execute("UPDATE users SET rate = 6500 WHERE login = 'lea'", []).unwrap();
+        c.execute("INSERT INTO settings(key, value) VALUES ('currency', '€')", []).unwrap();
+        c.execute("UPDATE users SET rate_currency = ?1 WHERE rate > 0 AND rate_currency = ''", params![display_currency(&c)]).unwrap(); // what open() does
+        set_rate(&c, &jane, &json!({"currency": "USD"})).unwrap();
+        let p = time_report(&c, &jane, Scope::Project("SHOP"), &[]).unwrap();
+        // 65 euros are 70.65 dollars: not 65 dollars
+        assert_eq!((p["rates"]["lea"].as_i64(), p["currency"].as_str()), (Some(7065), Some("USD")));
+        // a rate set without a currency is written down in the one shown today, then left alone
+        seen(&c, "tom", "Tom", "");
+        set_rate(&c, &who("tom", false), &json!({"rate": 1000})).unwrap();
+        set_rate(&c, &jane, &json!({"currency": "CHF"})).unwrap();
+        assert_eq!(my_money(&c, "tom")["rate_currency"], "USD");
+        assert_eq!(my_money(&c, "lea")["rate_currency"], "EUR");
+    }
+
+    #[test]
+    fn a_currency_in_use_cannot_leave_the_table_and_a_refusal_writes_nothing() {
+        let c = setup();
+        let (jane, lea) = (who("jane", true), who("lea", false));
+        seen(&c, "lea", "Lea", "");
+        set_rate(&c, &lea, &json!({"rate": 5000, "rate_currency": "CHF"})).unwrap();
+        // CHF is in use: the table cannot drop it, nor the currency shown
+        assert!(set_rate(&c, &jane, &json!({"fx": {"EUR": 0.9}})).is_err());
+        assert!(set_rate(&c, &jane, &json!({"fx": {"EUR": 0.9, "CHF": 0.8}, "currency": "SEK"})).is_err());
+        assert!(set_rate(&c, &jane, &json!({"fx": {"CHF": 0.8}})).is_err()); // the page currency (EUR) would leave
+        // nothing was written by those refusals
+        assert_eq!((fx_table(&c).get("EUR").copied(), display_currency(&c).as_str()), (Some(0.92), "EUR"));
+        set_rate(&c, &jane, &json!({"fx": {"EUR": 0.9, "CHF": 0.8}, "currency": "CHF"})).unwrap();
+        assert_eq!((fx_table(&c).get("EUR").copied(), display_currency(&c).as_str()), (Some(0.9), "CHF"));
+    }
+    #[test]
+    fn dates_are_read_from_seconds() {
+        assert_eq!((date_of(0).as_str(), date_of(1_800_000_000).as_str(), date_of(951_782_400).as_str()), ("1970-01-01", "2027-01-15", "2000-02-29"));
+    }
+
+    #[test]
+    fn a_run_without_a_cost_is_estimated_from_its_tokens_and_not_counted_twice() {
+        let c = setup();
+        let (jane, lea) = (who("jane", true), who("lea", false));
+        let at = now() - 3600;
+        let send = |v: Value| report_run(&c, &lea, &v).unwrap();
+        // a session that reports 3 dollars, everything it started included, and an agent of it that reports none
+        send(json!({"run_id": "s", "agent": "session", "source": "claude-code", "task": "t", "state": "ok", "started": at, "ended": at + 1200,
+                    "model": "claude-opus-5-5", "cost_usd": 3.0, "ticket": "SHOP-1"}));
+        send(json!({"run_id": "a", "agent": "ouvrier", "source": "claude-code", "task": "t", "state": "ok", "started": at, "ended": at + 600, "parent": "s",
+                    "model": "claude-haiku-5-5", "tokens_in": 1_000_000, "tokens_cache_read": 600_000, "tokens_cache_write": 100_000, "tokens_out": 100_000,
+                    "ticket": "SHOP-1"}));
+        send(json!({"run_id": "u", "agent": "ouvrier", "source": "claude-code", "task": "t", "state": "ok", "started": at, "ended": at + 600,
+                    "model": "unknown-model", "tokens_in": 10, "tokens_out": 10, "ticket": "SHOP-1"}));
+        let list = |c: &Connection| -> std::collections::HashMap<String, Value> {
+            runs(c, &jane, "", "", "").unwrap().as_array().unwrap().iter().map(|r| (r["run_id"].as_str().unwrap().to_string(), r.clone())).collect()
+        };
+        let by = list(&c);
+        // haiku: 300k plain input, 100k output, 600k read, 100k written = 0.03 + 0.05 + 0.006 + 0.02 dollars
+        let (a, s, u) = (&by["a"], &by["s"], &by["u"]);
+        assert!((a["cost_counted"].as_f64().unwrap() - 0.106).abs() < 1e-9 && a["cost_estimated"] == true, "{a}");
+        // the session keeps what is left of its 3 dollars once the agent is counted on its own
+        assert!((s["cost_counted"].as_f64().unwrap() - 2.894).abs() < 1e-9 && s["cost_estimated"] == true, "{s}");
+        assert_eq!((u["cost_counted"].clone(), u["cost_estimated"].clone()), (Value::Null, json!(false))); // model not in the table
+        // 3 dollars in all, not 3.106
+        let total: f64 = by.values().filter_map(|r| r["cost_counted"].as_f64()).sum();
+        assert!((total - 3.0).abs() < 1e-9, "{total}");
+        // the hourly rate of an agent uses the estimate: 0.106 dollars in 10 minutes = 0.636 an hour = 0.585 euros = 59 cents
+        let rates = agent_rates(&c, &jane).unwrap();
+        let ouvrier = rates["agents"].as_array().unwrap().iter().find(|x| x["agent"] == "ouvrier").unwrap();
+        assert_eq!((ouvrier["per_hour"].as_i64(), ouvrier["estimated"].as_bool()), (Some(59), Some(true)));
+        // the prices: an administrator's, checked, dated
+        assert!(set_rate(&c, &lea, &json!({"prices": {"claude-haiku-5-5": [1, 2, 3, 4]}})).is_err());
+        assert!(set_rate(&c, &jane, &json!({"prices": {"claude-haiku-5-5": [1, 2, 3]}})).is_err());
+        assert!(set_rate(&c, &jane, &json!({"prices": {"claude-haiku-5-5": [1, 2, 3, -4]}})).is_err());
+        assert!(set_rate(&c, &jane, &json!({"prices": {"bad model": [1, 2, 3, 4]}})).is_err());
+        assert_eq!(my_money(&c, "lea")["prices_date"], "2026-11-24"); // the date of the values the table starts with
+        set_rate(&c, &jane, &json!({"prices": {"claude-haiku-5-5": [1.0, 2.0, 0.0, 0.0]}})).unwrap();
+        let (m, a2) = (my_money(&c, "lea"), list(&c)["a"].clone());
+        assert_eq!(m["prices_date"].as_str(), Some(date_of(now()).as_str()));
+        assert!((a2["cost_counted"].as_f64().unwrap() - (300_000.0 * 1.0 + 100_000.0 * 2.0) / 1e6).abs() < 1e-9, "{a2}");
+    }
+    #[test]
+    fn the_longest_prefix_gives_the_price_and_an_empty_table_is_refused() {
+        let mut t = std::collections::BTreeMap::new();
+        t.insert("claude-opus".to_string(), [1.0, 0.0, 0.0, 0.0]);
+        t.insert("claude-opus-5-5".to_string(), [4.0, 0.0, 0.0, 0.0]);
+        let run = json!({"model": "claude-opus-5-5-20261201", "tokens_in": 1_000_000});
+        assert_eq!(estimate(&t, &run), Some(4.0));
+        assert_eq!(estimate(&t, &json!({"model": "claude-opus-5-5", "tokens_out": 5})), Some(0.0)); // no output price: free, not unknown
+        assert_eq!(estimate(&t, &json!({"model": "other", "tokens_in": 5})), None);
+        let c = setup();
+        assert!(set_rate(&c, &who("jane", true), &json!({"prices": {}})).is_err());
+    }
+    #[test]
+    fn the_team_page_shows_the_queue_its_viewer_may_see() {
+        let c = setup();
+        let jane = who("jane", true);
+        create_project(&c, &jane, &json!({"key": "BLOG", "name": "Blog"})).unwrap();
+        set_member(&c, &jane, "BLOG", &json!({"login": "max", "role": "contributor"})).unwrap();
+        for (k, title, bot) in [("SHOP", "First", "lea"), ("SHOP", "Taken", "lea"), ("SHOP", "Asked", "lea"), ("BLOG", "Hidden", "max"), ("SHOP", "Over", "lea")] {
+            create_ticket(&c, &jane, k, &json!({"title": title, "state": "todo", "assignee": bot})).unwrap();
+        }
+        update_ticket(&c, &jane, "SHOP-2", &json!({"state": "in_progress"})).unwrap();
+        update_ticket(&c, &jane, "SHOP-3", &json!({"state": "waiting"})).unwrap();
+        update_ticket(&c, &jane, "SHOP-4", &json!({"state": "done"})).unwrap();
+        let cfg = json!({"groups": [{"id": "g", "title": "Agents"}],
+                         "members": [{"id": "b", "name": "Bot", "assignees": ["lea", "max"]}, {"id": "n", "name": "None"}]});
+        // lea sees SHOP only: in progress first, then to do, then waiting; done and BLOG left out
+        let t = team(&c, &who("lea", false), &cfg).unwrap();
+        let ids: Vec<&str> = t["members"][0]["queue"].as_array().unwrap().iter().map(|q| q["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["SHOP-2", "SHOP-1", "SHOP-3"]);
+        assert_eq!(t["members"][1]["queue"], json!([]));
+        assert_eq!(t["groups"][0]["title"], "Agents");
+        // an administrator sees every project; outside the projects, nothing
+        assert_eq!(team(&c, &jane, &cfg).unwrap()["members"][0]["queue"].as_array().unwrap().len(), 4);
+        assert_eq!(team(&c, &who("eve", false), &cfg).unwrap()["members"][0]["queue"], json!([]));
+        // no team configured: an empty page, not an error
+        assert_eq!(team(&c, &jane, &Value::Null).unwrap(), json!({"groups": [], "members": [], "plan_url": ""}));
+    }
+    #[test]
+    fn a_table_of_runs_with_the_old_key_is_rebuilt_once_and_nothing_is_lost() {
+        let path = std::env::temp_dir().join(format!("cairn-plan-key-test-{}-{}.db", std::process::id(), now())).to_string_lossy().to_string();
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE runs(run_id TEXT PRIMARY KEY, login TEXT NOT NULL, agent TEXT NOT NULL, source TEXT NOT NULL, host TEXT NOT NULL DEFAULT '',
+                   project TEXT NOT NULL DEFAULT '', ticket TEXT NOT NULL DEFAULT '', task TEXT NOT NULL, state TEXT NOT NULL, model TEXT NOT NULL DEFAULT '',
+                   tokens_in INTEGER, tokens_out INTEGER, cost_usd REAL, started INTEGER NOT NULL, ended INTEGER, parent TEXT NOT NULL DEFAULT '',
+                   result TEXT NOT NULL DEFAULT '', updated INTEGER NOT NULL);
+                 INSERT INTO runs(run_id, login, agent, source, task, state, started, updated, cost_usd, tokens_in) VALUES('r', 'lea', 'ouvrier', 'claude-code', 't', 'ok', 1, 1, 2.5, 7);",
+            )
+            .unwrap();
+        }
+        let count = |c: &Connection, t: &str| c.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get::<_, i64>(0)).unwrap();
+        let c = open(&path);
+        assert_eq!((count(&c, "runs"), count(&c, "runs_before_0_27_1")), (1, 1));
+        let kept = c.query_row("SELECT cost_usd, tokens_in FROM runs WHERE login = 'lea' AND run_id = 'r'", [], |r| Ok((r.get::<_, f64>(0)?, r.get::<_, i64>(1)?))).unwrap();
+        assert_eq!(kept, (2.5, 7));
+        // the key is now the pair: the same id under another account is another run
+        c.execute("INSERT INTO runs(run_id, login, agent, source, task, state, started, updated) VALUES('r', 'tom', 'x', 'claude-code', 't', 'ok', 1, 1)", []).unwrap();
+        assert_eq!(count(&c, "runs"), 2);
+        drop(c);
+        // a second start changes nothing
+        let c = open(&path);
+        assert_eq!((count(&c, "runs"), count(&c, "runs_before_0_27_1")), (2, 1));
+        drop(c);
+        let _ = std::fs::remove_file(&path);
     }
 }
