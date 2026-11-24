@@ -20,6 +20,7 @@ sub-tickets, one per role, which its approval covers; each is built by the
 agent of its role, and the parent is closed once they all are.
 """
 import base64
+import collections
 import datetime
 import fnmatch
 import hashlib
@@ -31,6 +32,7 @@ import pwd
 import queue
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import tempfile
@@ -81,8 +83,13 @@ class Breach(Exception):
     """The change breaks the rules of rules.json: no pull request."""
 
 
+RECENT = collections.deque(maxlen=40)  # the last lines of the log, for /status
+NOW = {"ticket": ""}  # the ticket in hand
+
+
 def log(msg):
     print(msg, flush=True)
+    RECENT.append({"at": int(time.time()), "text": msg})
 
 
 def env(name, default=""):
@@ -324,6 +331,12 @@ class Budget:
             return f"daily budget of {self.max_usd:g} $ reached ({s['usd']:.2f} $ spent)"
         return None
 
+    def state(self):
+        """Today's count with the caps: what /status shows."""
+        s = self._read()
+        return {"tickets": s["tickets"], "max_tickets": self.max_tickets, "usd": round(s["usd"], 2), "max_usd": self.max_usd,
+                "paused": s["paused"]}
+
     def add(self, tickets=0, usd=0.0, paused=""):
         s = self._read()
         s.update(tickets=s["tickets"] + tickets, usd=s["usd"] + usd, paused=paused or s["paused"])
@@ -355,6 +368,16 @@ def mcp(conf, tool, key=None, **args):
     if out.get("error") or result.get("isError"):
         raise Refused(text or json.dumps(out.get("error")))
     return json.loads(text)
+
+
+def report_run(conf, key, run_id, **fields):
+    """Tells Cairn Plan about a run of this agent (Agents page): a summary, never the
+    instruction nor the output. A report that does not arrive is logged and the work goes on."""
+    fields = {k: v for k, v in fields.items() if v not in (None, "", 0, 0.0)}
+    try:
+        mcp(conf, "report_run", key=key, run_id=run_id, source="cairn-plan-agent", host=env("AGENT_HOST", socket.gethostname()), **fields)
+    except Exception as e:
+        log(f"run {run_id} not reported: {e!r}")
 
 
 def git(args, cwd=None, auth=None, check=True):
@@ -550,9 +573,14 @@ def work(conf, call, templates):
     except Refused as e:
         return say(f"not taken: {e}")
     say(f"taken ({call.get('woken_by') or call['event']})")
+    NOW["ticket"] = tid
     template = templates[role.get("prompt", "prompt.md")]
     others = {n: r.get("text", "") for n, r in (team or {}).get("roles", {}).items() if n != name}
     started, text = time.time(), TEXT[conf["lang"]]
+    # one run per turn of work on the ticket: reported now, and again when it ends
+    run_id, usd = f"plan-agent-{tid}-{int(started)}", 0.0
+    run = dict(agent=name, task=ticket["title"][:120], ticket=tid, model=role.get("model") or conf["model"], started=int(started))
+    report_run(conf, key, run_id, state="running", **run)
     w = os.path.join(conf["work"], "w")
     src, job, bundle, branch = os.path.join(conf["work"], "src"), os.path.join(w, "job"), os.path.join(w, "out.bundle"), f"agent/{tid}"
     push = repo.get("push") or repo["repo"]
@@ -593,6 +621,7 @@ def work(conf, call, templates):
             git(["push", "-q", push, f"{branch}:{branch}"], cwd=src, auth=auth)
         now = mcp(conf, "get_ticket", key=key, id=tid)
         if now["state"] != "in_progress" or asked(now, int(started)):  # Claude asked a question
+            report_run(conf, key, run_id, state="waiting", cost_usd=usd)
             return say(f"now {now['state']}, question asked, {new} commit(s) pushed, {usd:.2f} $")
         report = report.encode()[:9000].decode(errors="ignore")  # a comment holds 10 000 bytes
         if ahead:
@@ -620,8 +649,10 @@ def work(conf, call, templates):
             if not parts:
                 raise RuntimeError(text["nothing"].format(report=report[:4000]))
             mcp(conf, "comment_ticket", key=key, id=tid, body=report + cost)
+            report_run(conf, key, run_id, state="ok", cost_usd=usd)
             return say(f"split into {', '.join(k['id'] for k in parts)}, {usd:.2f} $")
         mcp(conf, "finish_ticket", key=key, id=tid, report=report + cost, minutes=max(1, round((time.time() - started) / 60)))
+        report_run(conf, key, run_id, state="ok", cost_usd=usd)
         say(f"done, {ahead} commit(s), {usd:.2f} $")
         if team and parent:
             try:
@@ -630,6 +661,7 @@ def work(conf, call, templates):
                 say(f"parent {parent['id']} not updated: {e!r}")
     except Exception as e:  # whatever went wrong, the ticket must not stay "in progress" with nobody on it
         say(f"failed: {e!r}")
+        report_run(conf, key, run_id, state="failed", cost_usd=usd or getattr(e, "usd", 0.0))
         why = str(e)[:1500]
         try:
             mcp(conf, "wait_ticket", key=key, id=tid, question=text["refused"].format(why=why, branch=branch)
@@ -637,6 +669,7 @@ def work(conf, call, templates):
         except Exception as e2:
             say(f"could not even say so in the ticket: {e2!r}")
     finally:
+        NOW["ticket"] = ""
         clean(conf)
 
 
@@ -645,10 +678,12 @@ def sweep(conf):
     cap was reached): approved tickets nobody is assigned to, and waiting
     tickets whose last comment is from whoever approved them. A ticket
     assigned to someone is theirs and is left alone."""
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()  # Cairn Plan wakes on the UTC day
     for project in sorted(conf["repos"]):
         try:
             for t in mcp(conf, "list_tickets", project=project)["tickets"]:
-                if not t.get("assignee"):
+                # a ticket that sleeps until a later day is left: Cairn Plan calls when it wakes
+                if not t.get("assignee") and not t.get("wake_date", "") > today:
                     JOBS.put({"event": "ticket.approved", "ticket": t["id"]})
             for t in mcp(conf, "list_tickets", project=project, state="waiting")["tickets"]:
                 full = mcp(conf, "get_ticket", id=t["id"])
@@ -661,6 +696,18 @@ def sweep(conf):
             log(f"sweep {project}: {e!r}")
 
 
+def status(conf):
+    """What the agent is doing, for the page of Cairn Plan: the ticket in
+    hand, what waits, the day's budget of each role, the last lines of the log."""
+    roles = {"agent": float(conf["daily_usd"])}
+    for team in conf["teams"].values():
+        for name, role in team["roles"].items():
+            roles[name] = float(role.get("usd", conf["daily_usd"]))
+    return {"now": int(time.time()), "ticket": NOW["ticket"], "queued": JOBS.qsize(), "projects": sorted(conf["repos"]),
+            "budgets": [dict(budget_of(conf, name, usd).state(), role=name) for name, usd in sorted(roles.items())],
+            "recent": list(RECENT)[::-1]}
+
+
 def serve(conf):
     class Hook(http.server.BaseHTTPRequestHandler):
         def answer(self, code, text):
@@ -670,6 +717,11 @@ def serve(conf):
             self.wfile.write(text.encode())
 
         def do_GET(self):
+            if self.path == "/status":  # for Cairn Plan only: it knows the secret of the webhook
+                given = (self.headers.get("Authorization") or "").encode()
+                if not conf["hook_secret"] or not hmac.compare_digest(given, ("Bearer " + conf["hook_secret"]).encode()):
+                    return self.answer(401, "unauthorized")
+                return self.answer(200, json.dumps(status(conf)))
             self.answer(*((200, "ok") if self.path == "/healthz" else (404, "not found")))
 
         def do_POST(self):

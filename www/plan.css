@@ -218,6 +218,42 @@ button.more { margin-top: 10px; color: var(--accent); }
 .rates summary { cursor: pointer; font-weight: 600; }
 .rates .form { margin-top: 12px; }
 
+/* agents page: few things, much room */
+.agents { display: flex; flex-direction: column; gap: 28px; }
+.agents h2 { margin: 0 0 12px; }
+.k1 { --k: var(--c1); } .k2 { --k: var(--c2); } .k3 { --k: var(--c3); } .k4 { --k: var(--c4); } .k5 { --k: var(--c5); } .k6 { --k: var(--c6); }
+.ag-role { display: inline-block; padding: 1px 9px; border-radius: 99px; font-size: 12px; font-weight: 600; color: var(--k, var(--accent));
+  border: 1px solid currentColor; white-space: nowrap; }
+.ag-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--k, var(--accent)); flex: none; }
+.ag-now { display: flex; flex-direction: column; gap: 10px; }
+.ag-now-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius); }
+.ag-now-row .since { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ag-list { display: flex; flex-direction: column; gap: 6px; }
+.ag-row { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 2fr) 120px; gap: 6px 16px; align-items: center; width: 100%;
+  padding: 10px 12px; border: 0; border-radius: var(--radius); background: none; text-align: left; white-space: normal; }
+.ag-row:hover { background: var(--track); }
+.ag-row[aria-expanded="true"] { background: color-mix(in srgb, var(--accent) 9%, var(--panel)); }
+.ag-row .who { display: flex; flex-direction: column; min-width: 0; }
+.ag-row .who b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ag-row .pill { justify-self: start; }
+.ag-track { position: relative; height: 16px; background: var(--track); border-radius: 5px; overflow: hidden; }
+.ag-bar { position: absolute; top: 3px; bottom: 3px; min-width: 5px; border-radius: 3px; background: var(--k, var(--accent)); }
+.ag-detail { display: flex; flex-direction: column; gap: 12px; margin: 0 0 10px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius); }
+.ag-step { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.ag-step .m { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.ag-team { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+.ag-card { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius); }
+.ag-card .n { font-size: 24px; font-weight: 600; }
+.pill.bad { background: var(--bad-bg); color: var(--bad-ink); }
+@media (prefers-reduced-motion: no-preference) {
+  .ag-dot.pulse { animation: ag-pulse 1.2s ease-in-out infinite; }
+  @keyframes ag-pulse { 50% { opacity: .35; } }
+}
+@media (max-width: 820px) {
+  .ag-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .ag-row .ag-track { grid-column: 1 / -1; grid-row: 2; }
+}
+
 /* tables */
 .table-wrap { padding: 0; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }
@@ -244,6 +280,7 @@ td.actions { text-align: right; }
 .comment .body, .question .body, .described .body { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .described { display: flex; flex-direction: column; gap: 6px; }
 .described > button { align-self: flex-start; }
+.agent-now { font-size: 1.15rem; margin: 0 0 12px; }
 .question { border-left: 3px solid var(--accent); }
 .question .form { margin-top: 12px; }
 /* a command to paste: kept as typed, scrolled sideways, copied by its button */
@@ -264,6 +301,7 @@ td.actions { text-align: right; }
   .app { grid-template-columns: minmax(0, 1fr); align-content: start; }
   .side { position: static; height: auto; padding: 12px 16px; gap: 10px; }
   #nav { flex-direction: row; overflow-x: auto; scrollbar-width: none; align-items: center; }
+  #nav > a { flex: none; }   /* a link keeps its width: the row scrolls instead of squeezing "For me" */
   .subnav { flex-direction: row; margin: 0; padding: 0; border: 0; }
   .group { flex-direction: row; align-items: center; flex: none; }
   .space-switch { width: auto; margin: 0 6px 0 0; flex: none; }

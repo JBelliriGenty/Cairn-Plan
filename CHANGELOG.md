@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.25.0
+
+- Wake-up date: new field "Wake up" of a ticket. Until that day the ticket
+  is out of "For me" and no agent takes it (`take_ticket` refuses). On the
+  day, the date is cleared, the people of the ticket are told, and an
+  approved ticket is announced to the agent again.
+- New page "Agent" for administrators (button "What the agent is doing" of
+  the Settings page): the ticket in hand, the tickets and dollars of the
+  day against the caps of each role, the roles stopped until tomorrow, the
+  last lines of the agent's log.
+- Agent: new `GET /status` next to `/hook`, answered only with the secret
+  of the webhook (`Authorization: Bearer`). The agent leaves a ticket that
+  sleeps when it looks for missed calls.
+- Phone (ntfy): a push is sent only for what waits on the person: a
+  question asked to them (`ask_owner`, `wait_ticket`) and a ticket that
+  wakes. Everything else stays in the page and the e-mail.
+- API: tickets carry `wake_date`; `GET /api/agent` (administrators).
+- Narrow screens: the links of the menu keep their width ("For me" was
+  squeezed); the row scrolls.
+
+## 0.24.0
+
+- New page "Agents" (menu, under the projects): what the agents do, as
+  they report it. A sentence (how many are at work), what runs now, one
+  line per piece of work with its verdict (a click opens it: who did
+  what, with which model, how long, how many tokens, what it cost), one
+  card per agent. Period: 24 hours, 7 days or 30 days. It follows the
+  runs live, like the other pages.
+- MCP: new tool `report_run`. An agent reports a run when it starts and
+  again when it ends, with the same `run_id`; what the second report
+  leaves out is kept. Only a summary (agent, task, state, model, tokens,
+  cost in dollars, times, ticket, project, parent, verdict): never the
+  instruction nor the output of a command. An account writes its own runs
+  only: another account's `run_id` is refused.
+- API: `GET /api/runs?since=<date or seconds>&agent=<name>&project=<KEY>`.
+  A run of a project is seen by the members of that project, like its
+  tickets; a run without a project is seen by administrators only.
+- New table `runs`, created at start. No migration of the tables that exist.
+- The agent (`agent/agent.py`) reports one run per turn of work on a ticket:
+  "running" when it takes the ticket, then "ok", "failed" or "waiting" with
+  the cost Claude Code counted (`total_cost_usd`).
+
 ## 0.23.0
 
 - MCP: new tool `close_question` (`id`, `report`). An agent closes a

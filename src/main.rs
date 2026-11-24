@@ -656,6 +656,37 @@ fn agent_hook(cfg: &Config, saved: &HashMap<String, String>) -> (String, String)
     (get("agent_hook_url", &cfg.agent_hook.0), get("agent_hook_secret", &cfg.agent_hook.1))
 }
 
+/// What the agent says of itself (its /status, next to its /hook), for an
+/// administrator: the ticket in hand, the day's budgets, its last lines.
+/// {"set": false}: no agent is set; "error": it does not answer.
+fn agent_status(cfg: &Config, r: Request, who: &Actor) {
+    if !who.admin {
+        return respond(r, 403, json!({"error": "only an administrator can see the agent"}).to_string(), "application/json");
+    }
+    // the lock is released before anything goes on the network
+    let saved = store::settings(&DB.get().expect("database").lock().unwrap_or_else(|e| e.into_inner()));
+    let (url, secret) = agent_hook(cfg, &saved);
+    let Some(base) = url.trim_end_matches('/').strip_suffix("/hook").filter(|_| !secret.is_empty()) else {
+        return respond(r, 200, json!({"set": false}).to_string(), "application/json");
+    };
+    let got = ureq::get(&format!("{base}/status"))
+        .timeout(std::time::Duration::from_secs(5))
+        .set("Authorization", &format!("Bearer {secret}"))
+        .call()
+        .map_err(|e| e.to_string())
+        .and_then(|res| res.into_string().map_err(|e| e.to_string()))
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).map_err(|e| e.to_string()));
+    let out = match got {
+        Ok(mut status) if status.is_object() => {
+            status["set"] = json!(true);
+            status
+        }
+        Ok(_) => json!({"set": true, "error": "unexpected answer"}),
+        Err(e) => json!({"set": true, "error": e}),
+    };
+    respond(r, 200, out.to_string(), "application/json")
+}
+
 /// The settings as the page shows them: what is in force, without the secrets.
 fn settings_view(cfg: &Config, saved: &HashMap<String, String>) -> Value {
     let out = outside(cfg, saved);
@@ -784,6 +815,9 @@ fn handle(cfg: &'static Config, mut r: Request) {
         }
         _ => {}
     }
+    if let (Method::Get, ["api", "agent"]) = (&method, segs.as_slice()) {
+        return agent_status(cfg, r, &who);
+    }
     if let (Method::Post, ["api", "settings", "test"]) = (&method, segs.as_slice()) {
         return test_send(cfg, r, &who, &email, &body);
     }
@@ -809,6 +843,7 @@ fn handle(cfg: &'static Config, mut r: Request) {
         (Method::Get, ["api", "notifications"]) => store::notifications(&c, &who),
         (Method::Post, ["api", "notifications"]) => store::read_notifications(&c, &who, &body),
         (Method::Get, ["api", "mine"]) => store::mine(&c, &who),
+        (Method::Get, ["api", "runs"]) => store::runs(&c, &who, &param(&query, "since"), &param(&query, "agent"), &param(&query, "project")),
         (Method::Get, ["api", "search"]) => store::search(&c, &who, &param(&query, "q"), &param(&query, "project")),
         (Method::Get, ["api", "projects"]) => store::projects(&c, &who),
         (Method::Post, ["api", "projects"]) => store::create_project(&c, &who, &body),
@@ -899,6 +934,7 @@ fn main() {
             // the lock is released before anything goes on the network
             let (waiting, calls, saved) = {
                 let c = DB.get().expect("database").lock().unwrap_or_else(|e| e.into_inner());
+                store::wake(&c); // the tickets whose wake-up date has come
                 (store::outbox(&c), store::hook_outbox(&c), store::settings(&c))
             };
             let out = outside(cfg, &saved);

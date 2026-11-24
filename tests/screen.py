@@ -11,10 +11,13 @@ import http.server, json, os, subprocess, sys, tempfile, threading, time, urllib
 
 APP, PROXY = 19394, 19395
 FENCE = "`" * 3
+KEY = "k" * 40   # the key of the account "claude", which reports the runs of the Agents page
 work = tempfile.mkdtemp()
+with open(work + "/keys", "w") as f:
+    f.write("test:" + KEY + "\n")
 with open(work + "/config.json", "w") as f:
     json.dump({"listen": "127.0.0.1:%d" % APP, "trusted_proxies": ["127.0.0.1"], "admin_groups": ["admins"],
-               "db": work + "/plan.db", "lang": "en"}, f)
+               "db": work + "/plan.db", "lang": "en", "mcp_keys_file": work + "/keys"}, f)
 server = subprocess.Popen(["cairn-plan", work + "/config.json"])
 
 
@@ -25,6 +28,15 @@ def call(login, path, body=None):
     if body is not None:
         req.add_header("Content-Type", "application/json")
     return json.loads(urllib.request.urlopen(req).read())
+
+
+def report_run(**run):
+    """A run reported through the MCP tool, as an agent does."""
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "report_run", "arguments": run}}
+    req = urllib.request.Request("http://127.0.0.1:%d/mcp" % APP, data=json.dumps(body).encode(),
+                                 headers={"Authorization": "Bearer " + KEY, "Content-Type": "application/json"})
+    out = json.loads(urllib.request.urlopen(req).read())
+    assert out["result"]["isError"] is False, out
 
 
 class Proxy(http.server.BaseHTTPRequestHandler):
@@ -83,6 +95,13 @@ try:
     call("bob", "tickets/DEMO-1", {"state": "waiting"})
     call("bob", "projects/DEMO/tickets", {"title": "Give the key of the shed", "state": "waiting", "assignee": "alice", "description": "I need it."})
     call("bob", "projects/DEMO/tickets", {"title": "Paint the fence"})
+    call("alice", "projects/DEMO/members", {"login": "claude", "role": "contributor"})
+    now = int(time.time())
+    report_run(run_id="s1", agent="ouvrier", source="claude-code", task="Sweep the shed", state="ok", started=now - 400, ended=now - 300,
+               ticket="DEMO-2", model="claude-sonnet-5-5", cost_usd=0.12)
+    report_run(run_id="s2", agent="controleur", source="claude-code", task="Check the shed", state="ok", started=now - 290, ended=now - 250,
+               ticket="DEMO-2", result="conforme")
+    report_run(run_id="s3", agent="ouvrier", source="claude-code", task="Paint the roof", state="running", started=now - 60)
 
     # route, what the page must show
     pages = [
@@ -90,13 +109,15 @@ try:
         # before the tickets: opening a ticket reads its notices
         ("#/n", ["Notifications", "Mark all as read", "Draw the plan", "earlier notices"]),
         ("#/p/DEMO", ["Draw the plan", "Paint the fence", "Create and approve"]),
-        ("#/t/DEMO-1", ["bob asks you", "Which colour for the roof?", "<svg", "Send the answer", "Edit the description"]),
+        ("#/t/DEMO-1", ["bob asks you", "Which colour for the roof?", "<svg", "Send the answer", "Edit the description", "Wake up"]),
         ("#/t/DEMO-2", ["bob asks you", "I need it.", "Done, close it"]),
         ("#/m", ["Waiting for your answer", "Give the key of the shed", "Draw the plan"]),
         ("#/p/DEMO/time", ["Time", "1"]),
         ("#/p/DEMO/members", ["Members of Demo project", "bob", "Export"]),
+        ("#/a", ["Agents", "1 agent at work", "Paint the roof", "Sweep the shed", "conforme", "The team", "ouvrier", "controleur"]),
         ("#/s", ["Settings"]),
         ("#/q", ["Search", "Type two characters or more."]),
+        ("#/agent", ["Agent", "No agent is set"]),
     ]
     bad = []
     for route, wanted in pages:

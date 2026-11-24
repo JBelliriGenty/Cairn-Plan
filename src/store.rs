@@ -23,7 +23,7 @@ pub const STATES: [&str; 6] = ["backlog", "todo", "in_progress", "waiting", "don
 pub const PRIORITIES: [&str; 5] = ["none", "low", "medium", "high", "urgent"];
 const ROLES: [&str; 3] = ["reader", "contributor", "owner"];
 /// Ticket fields a client may set, in the order they are checked.
-const FIELDS: [&str; 9] = ["title", "description", "state", "priority", "assignee", "start_date", "end_date", "milestone", "agent"];
+const FIELDS: [&str; 10] = ["title", "description", "state", "priority", "assignee", "start_date", "end_date", "milestone", "agent", "wake_date"];
 /// Sub-tickets a parent may have; a sub-ticket has none of its own.
 const MAX_CHILDREN: i64 = 8;
 
@@ -67,6 +67,12 @@ CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS hook_outbox(
   id INTEGER PRIMARY KEY, ticket INTEGER NOT NULL REFERENCES tickets(id), event TEXT NOT NULL, actor TEXT NOT NULL,
   at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS runs(
+  run_id TEXT PRIMARY KEY, login TEXT NOT NULL, agent TEXT NOT NULL, source TEXT NOT NULL, host TEXT NOT NULL DEFAULT '',
+  project TEXT NOT NULL DEFAULT '', ticket TEXT NOT NULL DEFAULT '', task TEXT NOT NULL, state TEXT NOT NULL,
+  model TEXT NOT NULL DEFAULT '', tokens_in INTEGER, tokens_out INTEGER, cost_usd REAL, started INTEGER NOT NULL,
+  ended INTEGER, parent TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '', updated INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS runs_started ON runs(started);
 ";
 
 pub fn open(path: &str) -> Connection {
@@ -88,6 +94,8 @@ pub fn open(path: &str) -> Connection {
     let _ = c.execute("ALTER TABLE users ADD COLUMN rate INTEGER NOT NULL DEFAULT 0", []);
     // 0.19.0: the version of someone's profile photo (when it was set, in milliseconds; 0: none)
     let _ = c.execute("ALTER TABLE users ADD COLUMN photo INTEGER NOT NULL DEFAULT 0", []);
+    // 0.25.0: the day a ticket wakes up; until then it is out of "for me" and no agent takes it
+    let _ = c.execute("ALTER TABLE tickets ADD COLUMN wake_date TEXT NOT NULL DEFAULT ''", []);
     c
 }
 
@@ -203,7 +211,7 @@ fn check(c: &Connection, pid: i64, field: &str, val: &str) -> R<()> {
                 || db(c.query_row("SELECT 1 FROM members WHERE project = ?1 AND login = ?2", params![pid, val], |_| Ok(())).optional())?
                     .is_some()
         }
-        "start_date" | "end_date" => val.is_empty() || valid_date(val),
+        "start_date" | "end_date" | "wake_date" => val.is_empty() || valid_date(val),
         "milestone" => val.chars().count() <= 80,
         "agent" => val.is_empty() || (val.len() <= 20 && valid_login(val)),
         _ => false,
@@ -326,7 +334,7 @@ pub fn project(c: &Connection, a: &Actor, key: &str) -> R<Value> {
         "SELECT t.number, t.title, t.state, t.priority, t.assignee, t.start_date, t.end_date, t.updated, t.milestone, t.agent,
                 COALESCE((SELECT number FROM tickets p WHERE p.id = t.parent), 0),
                 (SELECT COUNT(*) FROM tickets k WHERE k.parent = t.id AND k.state != 'cancelled'),
-                (SELECT COUNT(*) FROM tickets k WHERE k.parent = t.id AND k.state = 'done')
+                (SELECT COUNT(*) FROM tickets k WHERE k.parent = t.id AND k.state = 'done'), t.wake_date
          FROM tickets t WHERE t.project = ?1 ORDER BY t.number DESC",
     ))?;
     let tickets: Vec<Value> = db(db(st.query_map(params![pid], |r| {
@@ -338,6 +346,7 @@ pub fn project(c: &Connection, a: &Actor, key: &str) -> R<Value> {
             "milestone": r.get::<_, String>(8)?, "agent": r.get::<_, String>(9)?,
             "parent": if parent > 0 { format!("{key}-{parent}") } else { String::new() },
             "progress": {"total": r.get::<_, i64>(11)?, "done": r.get::<_, i64>(12)?},
+            "wake_date": r.get::<_, String>(13)?,
         }))
     }))?
     .collect())?;
@@ -449,10 +458,10 @@ pub fn create_ticket(c: &Connection, a: &Actor, key: &str, v: &Value) -> R<Value
     let n: i64 = db(c.query_row("SELECT next_number - 1 FROM projects WHERE id = ?1", params![pid], |r| r.get(0)))?;
     db(c.execute(
         "INSERT INTO tickets(project, number, title, description, state, priority, assignee, start_date, end_date, milestone,
-                             author, created, updated, agent, parent)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14)",
+                             author, created, updated, agent, parent, wake_date)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14, ?15)",
         params![pid, n, vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], a.login, now(), vals[8],
-                parent.map_or(0, |(id, _)| id)],
+                parent.map_or(0, |(id, _)| id), vals[9]],
     ))?;
     let tid = c.last_insert_rowid();
     event(c, tid, &a.login, "created", "", &vals[2])?;
@@ -548,7 +557,7 @@ pub fn update_ticket(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value>
         return denied("readers cannot edit tickets");
     }
     let old: Vec<String> = db(c.query_row(
-        "SELECT title, description, state, priority, assignee, start_date, end_date, milestone, agent FROM tickets WHERE id = ?1",
+        "SELECT title, description, state, priority, assignee, start_date, end_date, milestone, agent, wake_date FROM tickets WHERE id = ?1",
         params![tid],
         |r| (0..FIELDS.len()).map(|i| r.get(i)).collect(),
     ))?;
@@ -559,7 +568,7 @@ pub fn update_ticket(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value>
         check(c, pid, f, &new)?;
         if rank < 3 {
             // the agent role says who builds it: part of what was approved
-            if (*f == "title" || *f == "description" || *f == "agent") && state != "backlog" {
+            if (*f == "title" || *f == "description" || *f == "agent" || *f == "wake_date") && state != "backlog" {
                 return denied("only a project owner can change the text of an approved ticket");
             }
             if *f == "state" && (new == "todo" || state == "backlog") {
@@ -620,7 +629,7 @@ pub fn mine(c: &Connection, a: &Actor) -> R<Value> {
                 COALESCE((SELECT MAX(at) FROM events WHERE ticket = t.id AND field IN ('state', 'created') AND new = t.state), t.updated),
                 {}, {}
          FROM tickets t JOIN projects p ON p.id = t.project
-         WHERE t.state NOT IN ('done', 'cancelled')
+         WHERE t.state NOT IN ('done', 'cancelled') AND (t.wake_date = '' OR t.wake_date <= date('now'))
            AND (t.assignee = ?1 OR (t.state = 'waiting' AND ?1 IN ({}, {}) AND ?1 != {}))
          ORDER BY t.state != 'waiting', t.updated DESC",
         last("author"),
@@ -645,7 +654,7 @@ pub fn ticket_view(c: &Connection, a: &Actor, id: &str) -> R<Value> {
     let (_, rank, tid) = ticket(c, a, id)?;
     let mut t: Value = db(c.query_row(
         "SELECT t.title, t.description, t.state, t.priority, t.assignee, t.start_date, t.end_date, t.author, t.created, t.updated,
-                t.milestone, t.agent, COALESCE((SELECT number FROM tickets p WHERE p.id = t.parent), 0)
+                t.milestone, t.agent, COALESCE((SELECT number FROM tickets p WHERE p.id = t.parent), 0), t.wake_date
          FROM tickets t WHERE t.id = ?1",
         params![tid],
         |r| {
@@ -655,6 +664,7 @@ pub fn ticket_view(c: &Connection, a: &Actor, id: &str) -> R<Value> {
                 "priority": r.get::<_, String>(3)?, "assignee": r.get::<_, String>(4)?, "start_date": r.get::<_, String>(5)?,
                 "end_date": r.get::<_, String>(6)?, "author": r.get::<_, String>(7)?, "created": r.get::<_, i64>(8)?,
                 "updated": r.get::<_, i64>(9)?, "milestone": r.get::<_, String>(10)?, "agent": r.get::<_, String>(11)?,
+                "wake_date": r.get::<_, String>(13)?,
                 "parent": if parent > 0 { format!("{}-{parent}", id.rsplit_once('-').map_or("", |(k, _)| k)) } else { String::new() },
             }))
         },
@@ -1074,6 +1084,9 @@ pub struct Notice {
     /// "comment" (detail: its first words), "state" (detail: the new state), "assigned".
     pub kind: String,
     pub detail: String,
+    /// It waits on the person: a question asked to them, a ticket that wakes.
+    /// Only such a notice is pushed to a phone.
+    pub question: bool,
 }
 
 /// Tells the people who take part in a ticket (its author, its assignee,
@@ -1202,6 +1215,39 @@ pub fn hook_outbox(c: &Connection) -> Vec<Call> {
     calls
 }
 
+/* ---------- wake-up date ---------- */
+
+/// True if the ticket sleeps: its wake-up date is still to come.
+pub fn asleep(c: &Connection, a: &Actor, id: &str) -> R<bool> {
+    let (_, _, tid) = ticket(c, a, id)?;
+    db(c.query_row("SELECT wake_date > date('now') FROM tickets WHERE id = ?1", params![tid], |r| r.get(0)))
+}
+
+/// Wakes the tickets whose date has come: the date is cleared, the people of
+/// the ticket are told, and an approved ticket is announced again, so that
+/// an agent takes it now. Returns how many woke.
+pub fn wake(c: &Connection) -> usize {
+    let due: Vec<(i64, String, String)> = c
+        .prepare("SELECT id, wake_date, state FROM tickets WHERE wake_date != '' AND wake_date <= date('now')")
+        .and_then(|mut st| {
+            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            Ok(rows.filter_map(Result::ok).collect())
+        })
+        .unwrap_or_default();
+    for (tid, date, state) in &due {
+        let _ = c.execute("UPDATE tickets SET wake_date = '' WHERE id = ?1", params![tid]);
+        if state == "done" || state == "cancelled" {
+            continue;
+        }
+        let _ = event(c, *tid, "cairn-plan", "wake_date", date, "");
+        let _ = notify(c, *tid, "cairn-plan", "wake", "", None);
+        if state == "todo" {
+            let _ = announce(c, *tid, "ticket.approved", "cairn-plan");
+        }
+    }
+    due.len()
+}
+
 /* ---------- search ---------- */
 
 /// The text around the first match of `q` in `text`, on one line.
@@ -1243,6 +1289,151 @@ pub fn search(c: &Connection, a: &Actor, q: &str, key: &str) -> R<Value> {
             "updated": r.get::<_, i64>(6)?, "excerpt": if around.is_empty() { String::new() } else { excerpt(&around, q) },
         }))
     }))?;
+    Ok(Value::Array(db(rows.collect())?))
+}
+
+/* ---------- runs of agents ---------- */
+
+const RUN_STATES: [&str; 4] = ["running", "ok", "failed", "waiting"];
+const RUN_COLS: &str = "run_id, login, agent, source, host, project, ticket, task, state, model, tokens_in, tokens_out, cost_usd, \
+                        started, ended, parent, result, updated";
+/// Fields a client may send, besides "run_id"; what a later send leaves out is kept.
+const RUN_FIELDS: [&str; 15] = [
+    "agent", "source", "host", "project", "ticket", "task", "state", "model", "tokens_in", "tokens_out", "cost_usd", "started", "ended",
+    "parent", "result",
+];
+
+fn run_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "run_id": r.get::<_, String>(0)?, "login": r.get::<_, String>(1)?, "agent": r.get::<_, String>(2)?,
+        "source": r.get::<_, String>(3)?, "host": r.get::<_, String>(4)?, "project": r.get::<_, String>(5)?,
+        "ticket": r.get::<_, String>(6)?, "task": r.get::<_, String>(7)?, "state": r.get::<_, String>(8)?,
+        "model": r.get::<_, String>(9)?, "tokens_in": r.get::<_, Option<i64>>(10)?, "tokens_out": r.get::<_, Option<i64>>(11)?,
+        "cost_usd": r.get::<_, Option<f64>>(12)?, "started": r.get::<_, i64>(13)?, "ended": r.get::<_, Option<i64>>(14)?,
+        "parent": r.get::<_, String>(15)?, "result": r.get::<_, String>(16)?, "updated": r.get::<_, i64>(17)?,
+    }))
+}
+
+fn valid_ticket_id(s: &str) -> bool {
+    s.rsplit_once('-').is_some_and(|(k, n)| valid_key(k) && (1..=9).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// A short text of a run: absent is empty; a number, a line break or a text that is too long is refused.
+fn run_text(m: &Value, key: &str, max: usize, required: bool) -> R<String> {
+    let s = match &m[key] {
+        Value::Null => "",
+        Value::String(s) => s.trim(),
+        _ => return bad(&format!("{key}: a text is expected")),
+    };
+    if s.chars().count() > max || s.chars().any(char::is_control) {
+        return bad(&format!("{key}: at most {max} characters, on one line"));
+    }
+    if required && s.is_empty() {
+        return bad(&format!("{key} is required"));
+    }
+    Ok(s.to_string())
+}
+
+/// An account reports a run of its own. A second report of the same
+/// "run_id" updates it (what the new report leaves out is kept); one made by
+/// another account is refused. Only a summary: never the instruction nor the
+/// output of the agent, which may hold a secret. A run of a project is
+/// reported by one of its contributors; the project is read from the ticket
+/// when it is not given.
+pub fn report_run(c: &Connection, a: &Actor, v: &Value) -> R<Value> {
+    let run_id = run_text(v, "run_id", 100, true)?;
+    let old: Option<Value> =
+        db(c.query_row(&format!("SELECT {RUN_COLS} FROM runs WHERE run_id = ?1"), params![run_id], run_json).optional())?;
+    if old.as_ref().is_some_and(|o| o["login"] != a.login.as_str()) {
+        return denied("this run was reported by another account");
+    }
+    let mut m = old.unwrap_or_else(|| json!({}));
+    for k in RUN_FIELDS {
+        if !v[k].is_null() {
+            m[k] = v[k].clone();
+        }
+    }
+    let agent = run_text(&m, "agent", 60, true)?;
+    let source = run_text(&m, "source", 30, true)?;
+    if !valid_login(&source) {
+        return bad("source: lower case letters, digits, . _ - (e.g. claude-code)");
+    }
+    let state = run_text(&m, "state", 20, true)?;
+    if !RUN_STATES.contains(&state.as_str()) {
+        return bad(&format!("state: one of {}", RUN_STATES.join(", ")));
+    }
+    let (host, model, result) = (run_text(&m, "host", 60, false)?, run_text(&m, "model", 60, false)?, run_text(&m, "result", 60, false)?);
+    let (task, parent) = (run_text(&m, "task", 120, true)?, run_text(&m, "parent", 100, false)?);
+    let (mut project, ticket) = (run_text(&m, "project", 10, false)?, run_text(&m, "ticket", 20, false)?);
+    if !ticket.is_empty() && !valid_ticket_id(&ticket) {
+        return bad("ticket: an id such as SHOP-12");
+    }
+    let of_ticket = ticket.rsplit_once('-').map_or("", |(k, _)| k);
+    if project.is_empty() {
+        project = of_ticket.to_string();
+    }
+    if !ticket.is_empty() && project != of_ticket {
+        return bad("ticket: it belongs to another project");
+    }
+    if !project.is_empty() {
+        if !valid_key(&project) {
+            return bad("project: a project key such as SHOP");
+        }
+        if access(c, a, &project)?.1 < 2 {
+            return denied("a run of a project is reported by one of its contributors");
+        }
+    }
+    let int = |key: &str, max: i64| -> R<Option<i64>> {
+        match &m[key] {
+            Value::Null => Ok(None),
+            n => n.as_i64().filter(|n| (0..=max).contains(n)).map(Some).ok_or((400, format!("{key}: a whole number, 0 to {max}"))),
+        }
+    };
+    let (tokens_in, tokens_out) = (int("tokens_in", 1_000_000_000_000)?, int("tokens_out", 1_000_000_000_000)?);
+    let cost = match &m["cost_usd"] {
+        Value::Null => None,
+        n => Some(n.as_f64().filter(|n| (0.0..=1_000_000.0).contains(n)).ok_or((400, "cost_usd: a number, 0 to 1000000".to_string()))?),
+    };
+    let started = int("started", i64::MAX)?.filter(|s| *s > 0).ok_or((400, "started: seconds since 1970".to_string()))?;
+    let mut ended = int("ended", i64::MAX)?;
+    if ended.is_some_and(|e| e < started) {
+        return bad("ended: not before started");
+    }
+    if state == "running" && v["ended"].is_null() {
+        ended = None; // sent again as going on: the end of an earlier report no longer holds
+    } else if state != "running" && ended.is_none() {
+        ended = Some(now().max(started));
+    }
+    db(c.execute(
+        &format!(
+            "INSERT INTO runs({RUN_COLS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
+             ON CONFLICT(run_id) DO UPDATE SET agent=?3, source=?4, host=?5, project=?6, ticket=?7, task=?8, state=?9, model=?10,
+               tokens_in=?11, tokens_out=?12, cost_usd=?13, started=?14, ended=?15, parent=?16, result=?17, updated=?18"
+        ),
+        params![run_id, a.login, agent, source, host, project, ticket, task, state, model, tokens_in, tokens_out, cost, started, ended, parent, result, now()],
+    ))?;
+    db(c.query_row(&format!("SELECT {RUN_COLS} FROM runs WHERE run_id = ?1"), params![run_id], run_json))
+}
+
+/// The runs someone may see, newest first, 500 at most: those of the
+/// projects they belong to; an administrator also sees the runs without a
+/// project. `since`: a date "YYYY-MM-DD" (UTC) or seconds since 1970; a run
+/// counts when it ended, or was last reported, since then. An empty `agent` or
+/// `project` is no filter.
+pub fn runs(c: &Connection, a: &Actor, since: &str, agent: &str, project: &str) -> R<Value> {
+    let since: i64 = match since {
+        "" => 0,
+        s if s.bytes().all(|b| b.is_ascii_digit()) => s.parse().map_err(|_| (400, "since: a date or seconds".to_string()))?,
+        s => epoch(s).map(|e| e - 43_200).ok_or((400, "since: a date YYYY-MM-DD or seconds".to_string()))?,
+    };
+    let mut st = db(c.prepare(&format!(
+        "SELECT {RUN_COLS} FROM runs
+         WHERE COALESCE(ended, updated) >= ?1 AND (?2 = '' OR agent = ?2) AND (?3 = '' OR project = ?3)
+           AND (?4 OR (project != '' AND project IN
+                (SELECT p.key FROM projects p JOIN members m ON m.project = p.id WHERE m.login = ?5)))
+         ORDER BY started DESC, run_id LIMIT 500"
+    )))?;
+    let rows = db(st.query_map(params![since, agent, project, a.admin, a.login], run_json))?;
     Ok(Value::Array(db(rows.collect())?))
 }
 
@@ -1332,7 +1523,8 @@ pub fn outbox(c: &Connection) -> Vec<Notice> {
     let _ = c.execute("DELETE FROM notifications WHERE read = 1 AND at < ?1", params![now() - 90 * 86400]);
     let Ok(mut st) = c.prepare(
         "SELECT n.id, n.login, COALESCE(u.email, ''), COALESCE(u.mail, 1), p.key || '-' || t.number, t.title, n.actor, n.kind, n.detail,
-                COALESCE(u.ntfy_topic, '')
+                COALESCE(u.ntfy_topic, ''),
+                (n.kind = 'state' AND n.detail = 'waiting') OR (n.kind = 'assigned' AND t.state = 'waiting') OR (n.kind = 'wake' AND n.login = t.assignee)
          FROM notifications n JOIN tickets t ON t.id = n.ticket JOIN projects p ON p.id = t.project
          LEFT JOIN users u ON u.login = n.login WHERE n.sent = 0 ORDER BY n.id LIMIT 200",
     ) else {
@@ -1352,6 +1544,7 @@ pub fn outbox(c: &Connection) -> Vec<Notice> {
                     kind: r.get(7)?,
                     detail: r.get(8)?,
                     topic: r.get(9)?,
+                    question: r.get(10)?,
                 },
             ))
         })
@@ -1860,6 +2053,27 @@ mod tests {
     }
 
     #[test]
+    fn a_ticket_sleeps_until_its_date() {
+        let c = setup();
+        let jane = who("jane", true);
+        create_ticket(&c, &jane, "SHOP", &json!({"title": "Later", "state": "todo", "assignee": "jane", "wake_date": "2999-01-01"})).unwrap();
+        // asleep: not in "for me", not to be taken
+        assert_eq!(mine(&c, &jane).unwrap(), json!([]));
+        assert!(asleep(&c, &jane, "SHOP-1").unwrap());
+        hook_outbox(&c);
+        assert_eq!(wake(&c), 0);
+        // its date has come: it is back, the date is cleared, an agent is called, the phone rings
+        update_ticket(&c, &jane, "SHOP-1", &json!({"wake_date": "2000-01-01"})).unwrap();
+        assert_eq!(wake(&c), 1);
+        assert!(!asleep(&c, &jane, "SHOP-1").unwrap());
+        assert_eq!(mine(&c, &jane).unwrap()[0]["id"], "SHOP-1");
+        assert_eq!(ticket_view(&c, &jane, "SHOP-1").unwrap()["wake_date"], "");
+        assert!(hook_outbox(&c).iter().any(|h| h.event == "ticket.approved" && h.ticket == "SHOP-1"));
+        assert!(outbox(&c).iter().any(|n| n.kind == "wake" && n.question));
+        assert_eq!(update_ticket(&c, &jane, "SHOP-1", &json!({"wake_date": "soon"})).unwrap_err().0, 400);
+    }
+
+    #[test]
     fn a_draft_is_imported_once() {
         assert_eq!(epoch("1970-01-02"), Some(86_400 + 43_200));
         assert_eq!(epoch("2000-03-01"), Some(951_868_800 + 43_200));
@@ -2159,5 +2373,102 @@ mod tests {
         update_ticket(&c, &jane, "SHOP-1", &json!({"assignee": "lea"})).unwrap();
         set_member(&c, &jane, "SHOP", &json!({"login": "lea", "role": null})).unwrap();
         assert_eq!(ticket_view(&c, &jane, "SHOP-1").unwrap()["assignee"], "");
+    }
+    fn run(id: &str) -> Value {
+        json!({"run_id": id, "agent": "ouvrier", "source": "cairn-plan-agent", "task": "Fix the header", "state": "running", "started": 1000,
+               "ticket": "SHOP-1", "model": "claude-sonnet-5-5"})
+    }
+
+    #[test]
+    fn a_run_is_reported_then_updated_by_the_same_id() {
+        let c = setup();
+        let lea = who("lea", false);
+        let first = report_run(&c, &lea, &run("r1")).unwrap();
+        // the project is read from the ticket, an end comes with the end state
+        assert_eq!((first["project"].as_str(), first["state"].as_str(), first["ended"].clone(), first["login"].as_str()), (Some("SHOP"), Some("running"), Value::Null, Some("lea")));
+        let end = report_run(&c, &lea, &json!({"run_id": "r1", "state": "ok", "ended": 1090, "cost_usd": 0.46, "tokens_out": 3000, "result": "conforme"})).unwrap();
+        // what the second report leaves out is kept; nothing was added twice
+        assert_eq!((end["state"].as_str(), end["task"].as_str(), end["model"].as_str(), end["started"].as_i64()), (Some("ok"), Some("Fix the header"), Some("claude-sonnet-5-5"), Some(1000)));
+        assert_eq!((end["ended"].as_i64(), end["cost_usd"].as_f64(), end["tokens_in"].clone(), end["result"].as_str()), (Some(1090), Some(0.46), Value::Null, Some("conforme")));
+        assert_eq!(runs(&c, &lea, "", "", "").unwrap().as_array().unwrap().len(), 1);
+        // an end state without an end date gets one
+        // sent again as running (a retry): it is going on, the old end is dropped
+        let again = report_run(&c, &lea, &json!({"run_id": "r1", "state": "running"})).unwrap();
+        assert_eq!(again["ended"], Value::Null);
+        let late = report_run(&c, &lea, &json!({"run_id": "r2", "agent": "controleur", "source": "claude-code", "task": "Check", "state": "failed", "started": 1100})).unwrap();
+        assert!(late["ended"].as_i64().unwrap() >= 1100);
+    }
+
+    #[test]
+    fn an_account_reports_its_own_runs_only() {
+        let c = setup();
+        let (lea, tom, eve) = (who("lea", false), who("tom", false), who("eve", false));
+        report_run(&c, &lea, &run("r1")).unwrap();
+        // another account, even a member or an administrator, cannot write that run
+        for other in [&tom, &eve, &who("jane", true)] {
+            let r = report_run(&c, other, &json!({"run_id": "r1", "state": "ok", "ended": 2000}));
+            assert_eq!(r.unwrap_err().0, 403, "{}", other.login);
+        }
+        assert_eq!(runs(&c, &lea, "", "", "").unwrap()[0]["state"], "running");
+        // a reader or an outsider cannot report for the project either
+        assert_eq!(report_run(&c, &tom, &run("r3")).unwrap_err().0, 403);
+        assert_eq!(report_run(&c, &eve, &run("r4")).unwrap_err().0, 404);
+    }
+
+    #[test]
+    fn runs_are_seen_like_the_tickets_of_their_project() {
+        let c = setup();
+        let (jane, lea, tom, eve) = (who("jane", true), who("lea", false), who("tom", false), who("eve", false));
+        report_run(&c, &lea, &run("of-project")).unwrap();
+        let mut free = run("no-project");
+        free["ticket"] = json!("");
+        report_run(&c, &lea, &free).unwrap();
+        let ids = |a: &Actor| -> Vec<String> {
+            runs(&c, a, "", "", "").unwrap().as_array().unwrap().iter().map(|r| r["run_id"].as_str().unwrap().to_string()).collect()
+        };
+        // a member (any role) sees the run of the project; only an administrator sees the run without one
+        assert_eq!(ids(&lea), ["of-project"]);
+        assert_eq!(ids(&tom), ["of-project"]);
+        assert!(ids(&eve).is_empty());
+        assert_eq!(ids(&jane).len(), 2);
+        // filters: project, agent, date
+        assert_eq!(runs(&c, &jane, "", "", "SHOP").unwrap().as_array().unwrap().len(), 1);
+        assert!(runs(&c, &jane, "", "controleur", "").unwrap().as_array().unwrap().is_empty());
+        assert_eq!(runs(&c, &jane, "", "ouvrier", "").unwrap().as_array().unwrap().len(), 2);
+        let far = now() - 10;
+        report_run(&c, &lea, &json!({"run_id": "of-project", "state": "ok", "ended": far})).unwrap();
+        assert!(runs(&c, &jane, "2099-01-01", "", "").unwrap().as_array().unwrap().is_empty());
+        assert_eq!(runs(&c, &jane, "2026-01-01", "", "").unwrap().as_array().unwrap().len(), 2);
+        assert_eq!(runs(&c, &jane, &(far + 5).to_string(), "", "").unwrap().as_array().unwrap().len(), 1); // only the one still going on
+        assert_eq!(runs(&c, &jane, "yesterday", "", "").unwrap_err().0, 400);
+    }
+
+    #[test]
+    fn a_run_is_checked() {
+        let c = setup();
+        let lea = who("lea", false);
+        let with = |k: &str, v: Value| {
+            let mut r = run("r1");
+            r[k] = v;
+            report_run(&c, &lea, &r).unwrap_err().0
+        };
+        assert_eq!(with("state", json!("done")), 400);
+        assert_eq!(with("source", json!("My Script")), 400);
+        assert_eq!(with("task", json!("x".repeat(121))), 400);
+        assert_eq!(with("task", json!("")), 400);
+        assert_eq!(with("task", json!("two\nlines")), 400);
+        assert_eq!(with("ticket", json!("shop-1")), 400);
+        assert_eq!(with("project", json!("BLOG")), 400); // the ticket is SHOP-1
+        assert_eq!(with("cost_usd", json!(-1)), 400);
+        assert_eq!(with("tokens_in", json!(1.5)), 400);
+        assert_eq!(with("started", json!(0)), 400);
+        assert_eq!(with("ended", json!(5)), 400);
+        assert_eq!(report_run(&c, &lea, &json!({"run_id": "", "agent": "a"})).unwrap_err().0, 400);
+        assert_eq!(report_run(&c, &lea, &json!({"run_id": "x".repeat(101)})).unwrap_err().0, 400);
+        assert!(runs(&c, &who("jane", true), "", "", "").unwrap().as_array().unwrap().is_empty());
+        // a task of exactly 120 characters is fine
+        let mut r = run("r2");
+        r["task"] = json!("é".repeat(120));
+        report_run(&c, &lea, &r).unwrap();
     }
 }

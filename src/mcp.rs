@@ -65,6 +65,24 @@ fn tools() -> Value {
              "role": {"type": "string", "description": "Who builds it, a role of this project's agents, e.g. dev or doc"}}}},
         {"name": "close_question", "description": "Close a question you asked yourself with ask_owner, once you no longer need the answer (done another way, no longer useful): writes the report as a comment, then \"waiting\" becomes \"done\". Refused if this account did not ask it, or if it is no longer \"waiting\".",
          "inputSchema": {"type": "object", "required": ["id", "report"], "properties": {"id": id, "report": {"type": "string", "description": "Why it is closed: what was done instead, written as the closing comment"}}}},
+        {"name": "report_run", "description": "Report a run of an agent (a session, a task, a ticket worked) so that it shows on the Agents page: send it when it starts (state \"running\") and again, with the same run_id, when it ends (\"ok\", \"failed\" or \"waiting\"); what the second report leaves out is kept. Only your own runs: another account's run_id is refused. A run of a project is reported by a contributor of that project and is seen by its members; a run without a project is seen by administrators only. A summary only: never the instruction given to the agent, nor the output of a command.",
+         "inputSchema": {"type": "object", "required": ["run_id", "agent", "source", "task", "state", "started"], "properties": {
+             "run_id": {"type": "string", "description": "Stable text given by the source, 100 characters at most; sending it again updates the run"},
+             "agent": {"type": "string", "description": "Name shown for the agent, e.g. ouvrier, controleur, night routine"},
+             "source": {"type": "string", "description": "Where the report comes from, a short name in lower case: claude-code, cairn-plan-agent"},
+             "task": {"type": "string", "description": "Short label of the work, 120 characters at most; no secret"},
+             "state": {"type": "string", "enum": ["running", "ok", "failed", "waiting"], "description": "\"waiting\": the agent waits for an answer"},
+             "started": {"type": "integer", "description": "Start, seconds since 1970 (UTC)"},
+             "ended": {"type": "integer", "description": "End, seconds since 1970; left out for a run that is going on, set to now when the state is not \"running\""},
+             "host": {"type": "string", "description": "Host where the agent runs"},
+             "project": {"type": "string", "description": "Project key, e.g. SHOP; left out: read from the ticket, else none"},
+             "ticket": {"type": "string", "description": "Ticket id, e.g. SHOP-12"},
+             "model": {"type": "string", "description": "Model used, e.g. claude-sonnet-5-5"},
+             "tokens_in": {"type": "integer", "description": "Tokens read"},
+             "tokens_out": {"type": "integer", "description": "Tokens written"},
+             "cost_usd": {"type": "number", "description": "Cost in dollars at the API price, as Claude Code counts it (total_cost_usd); left out when unknown"},
+             "parent": {"type": "string", "description": "run_id of the run that started this one"},
+             "result": {"type": "string", "description": "Verdict in a few words, 60 characters at most, e.g. conforme, 3 écarts, deployed"}}}},
         {"name": "ask_owner", "description": "Ask a project owner for what only they can do or decide (a secret, an account, a firewall change, a choice): opens a ticket in state \"waiting\", assigned to them, who is notified. They answer in a comment, then move the ticket to \"done\" (nothing more for you) or to \"todo\" (you carry on as the ticket says).",
          "inputSchema": {"type": "object", "required": ["project", "title", "question"], "properties": {
              "project": {"type": "string", "description": "Project key, e.g. SHOP"},
@@ -122,6 +140,9 @@ fn call(c: &Connection, who: &Actor, tool: &str, a: &Value) -> R<Value> {
             if t["state"] != "todo" && !resumed {
                 return Err((409, "only a ticket in state \"todo\", approved by a project owner, can be taken".into()));
             }
+            if store::asleep(c, who, id)? {
+                return Err((409, "this ticket sleeps until its wake-up date".into()));
+            }
             store::update_ticket(c, who, id, &json!({"state": "in_progress", "assignee": who.login}))?;
             view(c, who, id)
         }
@@ -165,6 +186,7 @@ fn call(c: &Connection, who: &Actor, tool: &str, a: &Value) -> R<Value> {
             store::close_question(c, who, arg(a, "id")?, arg(a, "report")?)?;
             view(c, who, arg(a, "id")?)
         }
+        "report_run" => store::report_run(c, who, a),
         "ask_owner" => {
             let key = arg(a, "project")?;
             let owner = match a["owner"].as_str().filter(|s| !s.is_empty()) {
@@ -255,7 +277,7 @@ mod tests {
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
         assert!(handle(&c, &claude, &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).is_none());
         let list = handle(&c, &claude, &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 13);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 14);
         assert_eq!(handle(&c, &claude, &json!({"jsonrpc": "2.0", "id": 3, "method": "nope"})).unwrap()["error"]["code"], -32601);
 
         // it only sees the projects it was added to
@@ -311,5 +333,20 @@ mod tests {
         // answered and moved to "todo" by the owner: approved, Claude carries on
         store::update_ticket(&c, &jane, q["id"].as_str().unwrap(), &json!({"state": "todo"})).unwrap();
         assert_eq!(ok(&c, &claude, "take_ticket", json!({"id": q["id"]}))["state"], "in_progress");
+    }
+    #[test]
+    fn an_agent_reports_its_runs() {
+        let c = store::open(":memory:");
+        let jane = Actor { login: "jane".into(), admin: true };
+        let claude = Actor { login: "claude".into(), admin: false };
+        store::create_project(&c, &jane, &json!({"key": "SHOP", "name": "Shop"})).unwrap();
+        store::set_member(&c, &jane, "SHOP", &json!({"login": "claude", "role": "contributor"})).unwrap();
+        let start = json!({"run_id": "s1", "agent": "ouvrier", "source": "claude-code", "task": "Clean up", "state": "running", "started": 1000, "ticket": "SHOP-3"});
+        assert_eq!(ok(&c, &claude, "report_run", start)["project"], "SHOP");
+        let end = ok(&c, &claude, "report_run", json!({"run_id": "s1", "state": "ok", "ended": 1060, "cost_usd": 0.04}));
+        assert_eq!((end["state"].as_str(), end["task"].as_str(), end["cost_usd"].as_f64()), (Some("ok"), Some("Clean up"), Some(0.04)));
+        assert!(refused(&c, &claude, "report_run", json!({"run_id": "s2"})).contains("agent is required"));
+        let other = Actor { login: "other".into(), admin: false };
+        assert!(refused(&c, &other, "report_run", json!({"run_id": "s1", "state": "failed"})).contains("another account"));
     }
 }

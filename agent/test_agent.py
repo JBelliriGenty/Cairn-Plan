@@ -121,6 +121,23 @@ assert not agent.asked({"events": [ev(50, "waiting"), ev(100, "in_progress")]}, 
 said = agent.say_breaches({"lines": 401, "files": ["go.mod"]}, rules, agent.TEXT["fr"]["breach"])
 assert said == "401 lignes modifiées, 400 au plus; fichiers qu'il ne peut pas modifier : go.mod", said
 
+# a run is reported with the fields that are set, and a report that fails stops nothing
+sent = []
+def record_mcp(conf, tool, key=None, **args):
+    sent.append((tool, key, args))
+    return {}
+real_mcp, agent.mcp = agent.mcp, record_mcp
+agent.report_run({}, "k-dev", "plan-agent-SHOP-1-100", state="running", agent="dev", task="Fix", ticket="SHOP-1", model="", started=100, cost_usd=0.0)
+agent.report_run({}, "k-dev", "plan-agent-SHOP-1-100", state="ok", cost_usd=0.46)
+assert sent[0][:2] == ("report_run", "k-dev") and sent[0][2]["source"] == "cairn-plan-agent" and sent[0][2]["run_id"] == "plan-agent-SHOP-1-100"
+assert sent[0][2]["state"] == "running" and sent[0][2]["started"] == 100 and "model" not in sent[0][2] and "cost_usd" not in sent[0][2]
+assert sent[1][2]["state"] == "ok" and sent[1][2]["cost_usd"] == 0.46 and "started" not in sent[1][2]
+def broken_mcp(conf, tool, key=None, **args):
+    raise OSError("Cairn Plan is down")
+agent.mcp = broken_mcp
+agent.report_run({}, None, "plan-agent-SHOP-2-200", state="running")   # logged, no crash
+agent.mcp = real_mcp
+
 # a team: each role completed by team.json, with its own key; the lead must be one of them
 known = json.load(open(os.path.join(agent.DIR, "team.json"), encoding="utf-8"))
 with tempfile.TemporaryDirectory() as d:
@@ -184,3 +201,11 @@ request, data = prompt.split("<data>")
 assert '"part_of"' in request and "All of it" in request and '"other_parts"' in data and "SHOP-71" in data
 assert prompt.startswith("Writer.") and '"dev": "Developer"' in prompt
 assert "part_of" not in agent.fill("<request>{{REQUEST}}</request>", sub)
+
+# what /status shows: the day's count of a role with its caps, the last lines of the log
+import os as _os, tempfile as _tempfile
+_b = agent.Budget(_os.path.join(_tempfile.mkdtemp(), "state.json"), 10, 20.0)
+_b.add(tickets=1, usd=0.456)
+assert _b.state() == {"tickets": 1, "max_tickets": 10, "usd": 0.46, "max_usd": 20.0, "paused": ""}
+agent.log("DEMO-1: taken")
+assert agent.RECENT[-1]["text"] == "DEMO-1: taken"

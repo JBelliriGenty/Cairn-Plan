@@ -152,7 +152,7 @@ const STATE = { backlog: "Proposed", todo: "To do", in_progress: "In progress", 
 const STATE_CLASS = { backlog: "unk", todo: "todo", in_progress: "warn", waiting: "wait", done: "ok", cancelled: "off" };
 const PRIORITY = { none: "No priority", low: "Low", medium: "Medium", high: "High", urgent: "Urgent" };
 const ROLE = { reader: "Reader", contributor: "Contributor", owner: "Owner", admin: "Administrator" };
-const FIELD = { title: "Title", state: "State", priority: "Priority", assignee: "Assignee", start_date: "Start", end_date: "End", milestone: "Milestone", agent: "Agent" };
+const FIELD = { title: "Title", state: "State", priority: "Priority", assignee: "Assignee", start_date: "Start", end_date: "End", milestone: "Milestone", agent: "Agent", wake_date: "Wake up" };
 
 let ME = { states: [], priorities: [] };
 let FILTER = "open";
@@ -244,6 +244,8 @@ async function nav() {
       el("summary", {}, el("a", { href: "#/", ...(location.hash.length < 3 ? { "aria-current": "page" } : {}) }, t("Projects"))),
       el("div", { class: "subnav" }, ps.filter(p => p.space === SPACE).map(p =>
         el("a", { href: "#/p/" + p.key, ...(p.key === hereKey && !location.hash.endsWith("/time") ? { "aria-current": "page" } : {}) }, p.name)))),
+    // what the agents do, in every space
+    el("a", { href: "#/a", ...(location.hash.startsWith("#/a") ? { "aria-current": "page" } : {}) }, t("Agents")),
     // the time of the space, then of each project from its page
     ps.length > 0 && el("a", { class: "time-link", href: "#/e/" + encodeURIComponent(SPACE),
       ...(location.hash.startsWith("#/e/") || location.hash.endsWith("/time") ? { "aria-current": "page" } : {}) }, t("Time")),
@@ -511,6 +513,32 @@ async function mine() {
   );
 }
 
+/* ---------- agent ---------- */
+
+// What the agent says of itself, for an administrator: one sentence, the
+// day's budget of each role, then its last lines. Followed like a ticket.
+async function agentPage() {
+  const a = live("api/agent", await api("api/agent"));
+  const head = el("div", { class: "top" }, el("div", {}, el("h1", {}, t("Agent")),
+    el("p", { class: "meta" }, t("What the agent that takes approved tickets is doing today."))),
+    el("a", { class: "button", href: "#/s" }, t("Settings")));
+  if (!a.set) return show(head, el("p", { class: "note" }, t("No agent is set: give its webhook address and secret in the settings.")));
+  if (a.error) return show(head, el("p", { class: "note" }, t("The agent does not answer: {error}", { error: a.error })));
+  const stopped = a.budgets.filter(b => b.paused || b.tickets >= b.max_tickets || b.usd >= b.max_usd);
+  show(head,
+    el("p", { class: "agent-now" }, a.ticket ? [t("The agent works on"), " ", el("a", { href: "#/t/" + a.ticket }, a.ticket), "."]
+      : a.queued > 0 ? tp(a.queued, "{n} ticket waits for the agent.", "{n} tickets wait for the agent.") : t("The agent has no ticket in hand.")),
+    stopped.length > 0 && el("p", { class: "note" }, t("Stopped until tomorrow: {roles}.", { roles: stopped.map(b => b.role).join(", ") })),
+    el("h2", {}, t("Today")),
+    el("div", { class: "card" }, el("ul", { class: "list" }, a.budgets.map(b => el("li", {},
+      el("span", {}, el("strong", {}, b.role), b.paused && el("span", { class: "label" }, " · " + b.paused)),
+      el("span", { class: "label" }, tp(b.tickets, "{n} ticket", "{n} tickets") + " / " + b.max_tickets + " · " + dollars(b.usd) + " / " + dollars(b.max_usd)))))),
+    el("h2", {}, t("Last lines")),
+    el("div", { class: "card" }, a.recent.length ? el("ul", { class: "list notices" }, a.recent.map(l => el("li", {},
+      el("span", { class: "excerpt" }, l.text), el("span", { class: "label" }, stamp(l.at)))))
+      : el("p", { class: "empty" }, t("Nothing yet."))));
+}
+
 /* ---------- search ---------- */
 
 // Every ticket of the projects this person sees: id, title, description, comments.
@@ -582,6 +610,7 @@ async function ticket(id) {
     assignee: select(["", ...p.members.map(m => m.login)], tk.assignee, v => v || t("Nobody"), { disabled: !canEdit }),
     start_date: el("input", { type: "date", value: tk.start_date, disabled: !canEdit }),
     end_date: el("input", { type: "date", value: tk.end_date, disabled: !canEdit }),
+    wake_date: el("input", { type: "date", value: tk.wake_date, disabled: !canEdit }),
     milestone: el("input", { value: tk.milestone, maxLength: 80, disabled: !canEdit }),
     // which agent builds it: part of what is approved, frozen like the text
     agent: el("input", { value: tk.agent, maxLength: 20, pattern: "[a-z0-9._\\-]*", autocapitalize: "none", disabled: frozen }),
@@ -647,6 +676,7 @@ async function ticket(id) {
           el("button", { type: "button", class: "quiet", onclick: reply("") }, t("Only send the answer"))),
         el("small", {}, t(owner ? "Done: nothing more to do. Carry on: you approve what the ticket says comes next, with your answer."
           : "Done: nothing more to do.")))),
+    tk.wake_date && el("p", { class: "note" }, t("This ticket sleeps until {date}.", { date: day(tk.wake_date) })),
     waits && el("div", { class: "card question" },
       el("h2", {}, t("{author} asks you", { author: lastWord.author })),
       rich(lastWord.body),
@@ -665,6 +695,7 @@ async function ticket(id) {
       el("div", { class: "fields" },
         field("State", f.state), field("Priority", f.priority), field("Assignee", f.assignee),
         field("Start", f.start_date), field("End", f.end_date),
+        field("Wake up", f.wake_date, "Until that day the ticket is out of « For me » and no agent takes it."),
         field("Milestone", f.milestone, "A family of tickets: a phase, a version."),
         field("Agent", f.agent, "The agent role that builds it (dev, doc); empty: the project lead.")),
       el("datalist", { id: "milestones" }, [...new Set(p.tickets.map(k => k.milestone).filter(Boolean))].sort().map(s => el("option", { value: s }))),
@@ -730,7 +761,8 @@ async function ticket(id) {
 
 /* ---------- notifications ---------- */
 
-const NOTICE = { comment: "{actor} commented", state: "{actor} moved the ticket to {state}", assigned: "{actor} assigned the ticket to you" };
+const NOTICE = { comment: "{actor} commented", state: "{actor} moved the ticket to {state}", assigned: "{actor} assigned the ticket to you",
+  wake: "This ticket is back: its wake-up date has come" };
 const said = n => t(NOTICE[n.kind] || n.kind, { actor: n.actor, state: t(STATE[n.detail] || n.detail) });
 
 // The entry of the menu, with the number of unread notices, kept up to date
@@ -973,6 +1005,7 @@ async function settings() {
         field("Access token", f.ntfy_token, "Leave empty to keep the one that is saved."),
         field("Topic prefix", f.ntfy_prefix, "Each member chooses a topic that starts with it. Give the token write access to these topics only.")),
       el("h2", {}, t("Agent")),
+      el("p", {}, el("a", { class: "button", href: "#/agent" }, t("What the agent is doing"))),
       el("p", { class: "meta" }, t("Called as soon as a ticket is approved, and when whoever approved a waiting ticket answers it: an agent can then take the ticket at once.")),
       el("div", { class: "fields" },
         field("Webhook address", f.agent_hook_url, "Empty: nothing is called."),
@@ -1187,6 +1220,135 @@ async function timePage(kind, name) {
   redraw();
 }
 
+/* ---------- agents ---------- */
+
+// What the agents did and do: the runs they report (MCP tool report_run), grouped by piece of
+// work. Few things on the page: a sentence, what runs now, one line per piece of work (a click
+// opens it), one card per agent. Followed live like the other pages (follow()).
+const AGENT_PERIODS = { "1": "24 hours", "7": "7 days", "30": "30 days" };
+const AGENTS = { period: "1", pick: "", all: false };
+const STALE = 6 * 3600;   // a run still "running" and silent for that long was lost
+const nowSec = () => Math.floor(Date.now() / 1000);
+const lost = r => r.state === "running" && nowSec() - r.updated > STALE;
+const going = r => r.state === "running" && !lost(r);
+const finish = r => r.ended || r.updated;
+// One colour per agent name, among the six of the charts.
+function agentColour(name) {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return "k" + (h % 6 + 1);
+}
+const agentTag = name => el("span", { class: "ag-role " + agentColour(name) }, name);
+const lasted = r => clock(Math.max(60, finish(r) - r.started));
+
+// The runs of one ticket make one piece of work; a run without a ticket joins the run that started it.
+function pieces(runs) {
+  const byId = new Map(runs.map(r => [r.run_id, r]));
+  const root = r => { for (let i = 0; i < 10 && byId.has(r.parent); i++) r = byId.get(r.parent); return r; };
+  // the ticket of a run, else the one of the run that started it, and so on up
+  const ticketOf = r => { for (let i = 0; r && i < 10; i++, r = byId.get(r.parent)) if (r.ticket) return r.ticket; return ""; };
+  const found = new Map();
+  for (const r of runs) {
+    const key = ticketOf(r) || root(r).run_id;
+    if (!found.has(key)) found.set(key, { key, runs: [] });
+    found.get(key).runs.push(r);
+  }
+  return [...found.values()].map(g => {
+    g.runs.sort((a, b) => a.started - b.started);
+    g.start = g.runs[0].started;
+    g.last = Math.max(...g.runs.map(r => going(r) ? nowSec() : finish(r)));
+    g.title = g.runs[0].task;
+    g.ticket = (g.runs.find(r => r.ticket) || {}).ticket || "";
+    return g;
+  }).sort((a, b) => b.last - a.last);
+}
+
+// The verdict of a piece of work: what is going on, else how it ended.
+function verdict(g) {
+  const rs = g.runs;
+  if (rs.some(going)) return ["wait", t("In progress")];
+  if (rs.some(r => r.state === "waiting")) return ["warn", t("Waiting")];
+  if (rs.some(lost)) return ["unk", t("No news")];
+  if (rs.some(r => r.state === "failed")) return ["bad", t("Failed")];
+  const said = [...rs].reverse().find(r => r.result);
+  // a verdict that starts with a number ("3 gaps") counts something left to fix
+  return [said && /^[1-9]\d* /.test(said.result) ? "warn" : "ok", said ? said.result : t("Done")];
+}
+
+function runFacts(r) {
+  const out = [stamp(r.started), lasted(r), r.model, r.tokens_out != null && t("{n} tokens written", { n: r.tokens_out.toLocaleString(LOCALE()) }),
+    r.cost_usd != null && dollars(r.cost_usd), r.host];
+  return out.filter(Boolean).join(" · ");
+}
+
+function agentRow(g, redraw) {
+  const open = AGENTS.pick === g.key, span = Math.max(g.last - g.start, 1), [cls, label] = verdict(g);
+  const row = el("button", { type: "button", class: "ag-row", "aria-expanded": String(open),
+    onclick: () => { AGENTS.pick = open ? "" : g.key; redraw(); } },
+    el("span", { class: "who" }, el("b", {}, g.title), el("small", {}, [g.ticket, stamp(g.start)].filter(Boolean).join(" · "))),
+    el("span", { class: "ag-track" }, g.runs.map(r => el("span", {
+      class: "ag-bar " + agentColour(r.agent), title: r.agent + " · " + lasted(r),
+      style: "left:" + (100 * (r.started - g.start) / span).toFixed(2) + "%;width:" + (100 * ((going(r) ? nowSec() : finish(r)) - r.started) / span).toFixed(2) + "%" }))),
+    el("span", { class: "pill " + cls }, label));
+  if (!open) return row;
+  return [row, el("div", { class: "ag-detail" },
+    g.runs.map(r => el("div", { class: "ag-step" }, agentTag(r.agent), el("span", {}, r.task), el("span", { class: "m" }, runFacts(r)))),
+    g.ticket && el("a", { href: "#/t/" + g.ticket }, t("Open the ticket {id}", { id: g.ticket })))];
+}
+
+function agentCards(runs) {
+  const names = [...new Set(runs.map(r => r.agent))].sort();
+  return names.map(name => {
+    const mine = runs.filter(r => r.agent === name), usd = sum(mine, r => r.cost_usd || 0);
+    const lengths = mine.filter(r => r.ended).map(r => r.ended - r.started).sort((a, b) => a - b);
+    const models = {};
+    for (const r of mine) if (r.model) models[r.model] = (models[r.model] || 0) + 1;
+    const model = Object.keys(models).sort((a, b) => models[b] - models[a])[0];
+    const failed = mine.filter(r => r.state === "failed").length;
+    return el("div", { class: "ag-card" }, agentTag(name),
+      el("b", { class: "n" }, tp(mine.length, "{n} run", "{n} runs")),
+      el("small", {}, [model, lengths.length && t("median {t}", { t: clock(Math.max(60, lengths[Math.floor(lengths.length / 2)])) })].filter(Boolean).join(" · ")),
+      el("small", {}, [usd > 0 && dollars(usd), failed > 0 && t("{n} failed", { n: failed })].filter(Boolean).join(" · ")));
+  });
+}
+
+async function agentsPage() {
+  const path = "api/runs?since=" + (nowSec() - Number(AGENTS.period) * 86400);
+  const runs = live(path, await api(path));
+  const body = el("div", { class: "agents" });
+  const toggle = el("span", { class: "toggle", role: "group", "aria-label": t("Period") }, Object.keys(AGENT_PERIODS).map(v =>
+    el("button", { type: "button", "aria-pressed": String(AGENTS.period === v), onclick: () => { AGENTS.period = v; route(); } }, t(AGENT_PERIODS[v]))));
+  const redraw = () => {
+    const now = runs.filter(going), asked = runs.filter(r => r.state === "waiting").length;
+    const closed = runs.filter(r => !going(r) && r.state !== "waiting");
+    const tickets = new Set(closed.map(r => r.ticket).filter(Boolean)).size, usd = sum(runs, r => r.cost_usd || 0);
+    const fact = (label, value) => el("span", { class: "fact" }, el("small", {}, t(label)), el("b", {}, value));
+    const work = pieces(runs), shown = AGENTS.all || work.length <= 11 ? work : work.slice(0, 10);
+    body.replaceChildren(...[
+      el("div", { class: "time-hero" },
+        el("p", { class: "big" }, now.length
+          ? [el("strong", {}, tp(now.length, "{n} agent at work", "{n} agents at work"))]
+          : [el("strong", {}, t("No agent at work"))],
+        " ", el("span", {}, AGENTS.period === "1" ? t("in the last 24 hours") : t("in the last {n} days", { n: AGENTS.period }))),
+        el("div", { class: "facts" }, fact("Finished", String(closed.length)), fact("Tickets worked", String(tickets)),
+          fact("Waiting for an answer", String(asked)), usd > 0 && fact("Cost", dollars(usd)))),
+      runs.length === 0 && el("p", { class: "empty" }, t("No agent reported a run in this period.")),
+      now.length > 0 && el("section", {}, el("h2", {}, t("Now")),
+        el("div", { class: "ag-now" }, now.slice(0, 6).map(r => el("div", { class: "ag-now-row" },
+          el("i", { class: "ag-dot pulse " + agentColour(r.agent) }), agentTag(r.agent), el("b", {}, r.task),
+          el("span", { class: "since" }, t("for {t}", { t: clock(Math.max(60, nowSec() - r.started)) })))),
+          now.length > 6 && el("p", { class: "meta" }, t("and {n} more", { n: now.length - 6 })))),
+      work.length > 0 && el("section", {}, el("h2", {}, t("Work")),
+        el("div", { class: "ag-list" }, shown.map(g => agentRow(g, redraw)).flat()),
+        shown.length < work.length && el("button", { type: "button", class: "quiet more", onclick: () => { AGENTS.all = true; redraw(); } },
+          t("Show all ({n})", { n: work.length }))),
+      runs.length > 0 && el("section", {}, el("h2", {}, t("The team")), el("div", { class: "ag-team" }, agentCards(runs)))].filter(Boolean));
+  };
+  show(el("div", { class: "top" }, el("div", {}, el("h1", {}, t("Agents")),
+    el("p", { class: "meta" }, t("What the agents do, how long it takes and what it costs. Each agent reports its runs by itself."))), toggle), body);
+  redraw();
+}
+
 /* ---------- frame ---------- */
 
 async function route() {
@@ -1201,7 +1363,9 @@ async function route() {
     else if (h[0] === "n") await notices();
     else if (h[0] === "m") await mine();
     else if (h[0] === "q") await search();
+    else if (h[0] === "a") await agentsPage();
     else if (h[0] === "s") await settings();
+    else if (h[0] === "agent") await agentPage();
     else if (h[0] === "u") await profile();
     else return await home();
     await nav();

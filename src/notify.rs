@@ -57,6 +57,8 @@ fn sentence(lang: &str, n: &Notice) -> String {
                 format!("{} moved the ticket to \"{name}\".", n.actor)
             }
         }
+        "wake" if fr => "Ce ticket est de retour : sa date de réveil est arrivée.".to_string(),
+        "wake" => "This ticket is back: its wake-up date has come.".to_string(),
         _ if fr => format!("{} vous a assigné ce ticket.", n.actor),
         _ => format!("{} assigned this ticket to you.", n.actor),
     }
@@ -209,7 +211,10 @@ pub fn send(out: &Outside, waiting: &[Notice]) -> Vec<Letter> {
         }
         // the topic the person chose, else the one the configuration file gives them
         let topic = if n.topic.is_empty() { out.ntfy.as_ref().and_then(|x| x.topics.get(&n.login)) } else { Some(&n.topic) };
-        if let (Some(ntfy), Some(topic)) = (&out.ntfy, topic) {
+        // the phone rings only for what waits on the person (a question, a ticket that wakes),
+        // whichever notice of the message says so; the rest stays in the page and the e-mail
+        let asked = waiting.iter().any(|w| w.login == n.login && w.ticket == n.ticket && w.question);
+        if let (Some(ntfy), Some(topic), true) = (&out.ntfy, topic, asked) {
             if let Err(e) = push(ntfy, topic, &subject, &text, &link) {
                 eprintln!("notify {}: push about {} not sent: {e}", n.login, n.ticket);
             }
@@ -251,6 +256,7 @@ mod tests {
 
     fn notice(login: &str, ticket: &str, kind: &str, detail: &str) -> Notice {
         Notice {
+            question: true,
             login: login.into(),
             email: String::new(),
             mail: true,

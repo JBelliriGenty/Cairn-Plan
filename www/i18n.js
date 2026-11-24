@@ -178,6 +178,19 @@ const DICT = {
       "Dans les tickets de tous vos espaces : identifiant, titre, description et commentaires.",
     "search for 2 to 100 characters": "cherchez 2 à 100 caractères",
     "Edit the description": "Modifier la description", "Documentation": "Documentation",
+    "Wake up": "Réveiller le",
+    "Until that day the ticket is out of « For me » and no agent takes it.": "Jusqu'à ce jour, le ticket est hors de « À moi » et aucun agent ne le prend.",
+    "This ticket sleeps until {date}.": "Ce ticket dort jusqu'au {date}.",
+    "This ticket is back: its wake-up date has come": "Ce ticket est de retour : sa date de réveil est arrivée",
+    "this ticket sleeps until its wake-up date": "ce ticket dort jusqu'à sa date de réveil", "invalid wake_date": "date de réveil invalide",
+    "What the agent is doing": "Ce que fait l'agent",
+    "What the agent that takes approved tickets is doing today.": "Ce que fait aujourd'hui l'agent qui prend les tickets validés.",
+    "No agent is set: give its webhook address and secret in the settings.": "Aucun agent n'est réglé : donnez son adresse de webhook et son secret dans les réglages.",
+    "The agent does not answer: {error}": "L'agent ne répond pas : {error}",
+    "The agent works on": "L'agent travaille sur", "The agent has no ticket in hand.": "L'agent n'a aucun ticket en main.",
+    "{n} ticket waits for the agent.": "{n} ticket attend l'agent.", "{n} tickets wait for the agent.": "{n} tickets attendent l'agent.",
+    "Stopped until tomorrow: {roles}.": "Arrêté jusqu'à demain : {roles}.", "Today": "Aujourd'hui", "Last lines": "Dernières lignes",
+    "only an administrator can see the agent": "seul un administrateur voit l'agent",
     "Create and approve": "Créer et valider", "Export": "Exporter", "Add as a proposal": "Ajouter comme proposition",
     "Create and approve: the ticket is ready to be done at once. A proposal waits for your approval.":
       "Créer et valider : le ticket est prêt à être fait tout de suite. Une proposition attend votre validation.",
@@ -204,6 +217,18 @@ const DICT = {
     "only an administrator can set an hourly rate": "seul un administrateur peut régler un taux horaire",
     "invalid rate": "taux invalide", "invalid currency": "devise invalide",
     "Time · {name}": "Temps · {name}", "{n} project": "{n} projet", "{n} projects": "{n} projets",
+    // agents page
+    "24 hours": "24 heures", "No agent at work": "Aucun agent au travail",
+    "{n} agent at work": "{n} agent au travail", "{n} agents at work": "{n} agents au travail",
+    "in the last 24 hours": "sur les dernières 24 heures", "in the last {n} days": "sur les {n} derniers jours",
+    "Finished": "Terminés", "Tickets worked": "Tickets traités", "Waiting for an answer": "En attente d'une réponse",
+    "No agent reported a run in this period.": "Aucun agent n'a envoyé d'exécution sur cette période.",
+    "Now": "En ce moment", "Work": "Travaux", "The team": "L'équipe", "for {t}": "depuis {t}", "and {n} more": "et {n} autres",
+    "No news": "Sans nouvelles", "Failed": "Échec", "Open the ticket {id}": "Ouvrir le ticket {id}",
+    "{n} tokens written": "{n} jetons écrits", "{n} run": "{n} exécution", "{n} runs": "{n} exécutions",
+    "median {t}": "médiane {t}", "{n} failed": "{n} en échec",
+    "What the agents do, how long it takes and what it costs. Each agent reports its runs by itself.":
+      "Ce que font les agents, en combien de temps et pour quel coût. Chaque agent envoie lui-même ses exécutions.",
   },
 };
 

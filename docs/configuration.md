@@ -110,7 +110,31 @@ page, where they answer and move it to "done" or "todo"),
 `close_question` (closes a question this account asked with `ask_owner`,
 while it still waits: report as a comment, then "done"),
 `create_subticket` (splits a ticket this account took into sub-tickets of
-the same project, with a role each).
+the same project, with a role each),
+`report_run` (an agent reports a run for the "Agents" page, see below).
+
+### Runs of agents
+
+An agent tells Cairn Plan what it does with `report_run`: once when a run
+starts (`state` "running"), again with the same `run_id` when it ends
+("ok", "failed" or "waiting"); what the second call leaves out is kept.
+Required: `run_id`, `agent`, `source` (a short name in lower case:
+`claude-code`, `cairn-plan-agent`), `task` (120 characters at most), `state`,
+`started` (seconds since 1970). Optional: `ended`, `host`, `project`,
+`ticket` (the project is read from it), `model`, `tokens_in`, `tokens_out`,
+`cost_usd` (dollars at the API price), `parent` (the `run_id` that started
+it), `result` (60 characters at most: "deployed", "3 gaps").
+
+- Send a summary only: never the instruction given to the agent, nor the
+  output of a command. Both may hold a secret.
+- An account writes its own runs: a `run_id` reported by another account
+  is refused.
+- A run of a project needs a contributor of that project. Its members see
+  it, like its tickets. A run without a project is seen by administrators
+  only.
+- A run still "running" that sent nothing for 6 hours shows as "No news".
+- Read them with `GET /api/runs?since=<date or seconds>&agent=<name>&project=<KEY>`
+  (500 newest at most). No setting is needed: the table is created at start.
 
 A sub-ticket created by whoever took its parent starts "todo": the
 parent's approval covers it, as long as the parent is in progress, was
