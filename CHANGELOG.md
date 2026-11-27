@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.38.0 (2026-11-27)
+
+- Agents page: the line of a run that used several models names them all,
+  the one with the most tokens first (`claude-fable-5-2 + claude-opus-5-5`).
+  A session that stayed on a dear model for part of its work shows at a
+  glance.
+
+## 0.37.1 (2026-11-27)
+
+- Cost of a run: `report_run` takes `models`, the tokens of the run by model
+  (same counts as the run, plus `tokens_cache_write_5m`, the part of the cache
+  writes kept 5 minutes). Each model is priced at its own rate; a 5-minute
+  cache write counts 1.25 times the input price (it was counted at the 1-hour
+  price, 2 times). A run that gives `models` is priced from them, whatever
+  `cost_usd` it sent: the total a session of Claude Code writes in its
+  transcript starts again from zero when its process restarts, and was up to
+  40 times too low. Its agents are no longer taken off its cost: `models`
+  holds its own tokens only.
+
 ## 0.37.0 (2026-11-27)
 
 - New key `search_origins`: pages of other sites that may read

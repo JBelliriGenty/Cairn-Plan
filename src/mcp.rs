@@ -24,6 +24,12 @@ Such a ticket waits on the owner; once they move it to \"todo\", they approved w
 
 fn tools() -> Value {
     let id = json!({"type": "string", "description": "Ticket id, e.g. APP-12"});
+    // apart from the list below: nested any deeper, json! reaches its recursion limit
+    let models = json!({"type": "array", "description": "The tokens of the run by model, 20 models at most: Cairn Plan then prices each model at its own rate, and uses that instead of cost_usd. Only the tokens of the run itself, not those of the runs it started",
+        "items": {"type": "object", "required": ["model"], "properties": {
+        "model": {"type": "string"}, "tokens_in": {"type": "integer"}, "tokens_out": {"type": "integer"},
+        "tokens_cache_read": {"type": "integer"}, "tokens_cache_write": {"type": "integer"},
+        "tokens_cache_write_5m": {"type": "integer", "description": "Part of tokens_cache_write kept 5 minutes (cheaper than the 1-hour write)"}}}});
     json!([
         {"name": "list_projects", "description": "Projects this account is a member of, with their space, this account's role and ticket counts (\"open\": tickets neither done nor cancelled; \"total\": all).",
          "inputSchema": {"type": "object", "properties": {}}},
@@ -87,7 +93,8 @@ fn tools() -> Value {
              "tokens_out": {"type": "integer", "description": "Tokens written"},
              "tokens_cache_read": {"type": "integer", "description": "Part of tokens_in read from the cache; with tokens_cache_write, lets Cairn Plan estimate the cost of a run that gives none"},
              "tokens_cache_write": {"type": "integer", "description": "Part of tokens_in written to the cache"},
-             "cost_usd": {"type": "number", "description": "Cost in dollars at the API price, as Claude Code counts it (total_cost_usd); left out when unknown (Cairn Plan then estimates it from the tokens). A run that gives the cost of everything it started loses the estimated cost of the runs that name it as their parent; give no cost_usd to a run whose cost is already in its parent's"},
+             "models": models,
+             "cost_usd": {"type": "number", "description": "Cost in dollars at the API price, as a finished run of Claude Code counts it (total_cost_usd of claude -p); left out when unknown (Cairn Plan then estimates it from the tokens). Not the cost-state of a session transcript: it starts again from zero when the session restarts. A run that gives the cost of everything it started loses the estimated cost of the runs that name it as their parent; give no cost_usd to a run whose cost is already in its parent's"},
              "parent": {"type": "string", "description": "run_id of the run that started this one"},
              "result": {"type": "string", "description": "Verdict in a few words, 60 characters at most, e.g. conforme, 3 écarts, deployed"}}}},
         {"name": "ask_owner", "description": "Ask a project owner for what only they can do or decide (a secret, an account, a firewall change, a choice): opens a ticket in state \"waiting\", assigned to them, who is notified. They answer in a comment, then move the ticket to \"done\" (nothing more for you) or to \"todo\" (you carry on as the ticket says).",

@@ -4,6 +4,9 @@
 //! headers of the proxies listed in the configuration.
 //! Rules and data: store.rs. Configuration: docs/configuration.md.
 
+// the list of MCP tools (mcp.rs) is one json! literal: past the default limit of 128 as it grows
+#![recursion_limit = "256"]
+
 mod hooks;
 mod mcp;
 mod notify;

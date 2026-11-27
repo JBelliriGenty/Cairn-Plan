@@ -124,8 +124,10 @@ Required: `run_id`, `agent`, `source` (a short name in lower case:
 `claude-code`, `cairn-plan-agent`), `task` (120 characters at most), `state`,
 `started` (seconds since 1970). Optional: `ended`, `host`, `project`,
 `ticket` (the project is read from it), `model`, `tokens_in`, `tokens_out`,
-`cost_usd` (dollars at the API price), `parent` (the `run_id` that started
-it), `result` (60 characters at most: "deployed", "3 gaps").
+`tokens_cache_read`, `tokens_cache_write`, `models` (the same four counts
+for each model, plus `tokens_cache_write_5m`), `cost_usd` (dollars at the API
+price), `parent` (the `run_id` that started it), `result` (60 characters at
+most: "deployed", "3 gaps").
 
 - Send a summary only: never the instruction given to the agent, nor the
   output of a command. Both may hold a secret.
@@ -204,6 +206,13 @@ cost dollars, as Claude Code counts them.
   cache write for one hour). An administrator sets the table in the same
   block of the Settings page; it shows the date of its last change. A model
   that is not in the table has no estimate.
+- A run that gives `models` is priced from them, each model at its own rate,
+  even when it also sent `cost_usd` (no model of the list in the table: no
+  cost). A cache write kept 5 minutes
+  (`tokens_cache_write_5m`) counts 1.25 times the input price. Send `models`
+  for a session of Claude Code: the total it writes in its transcript
+  (`cost-state`) starts again from zero when its process restarts. `models`
+  holds the tokens of the run itself, not those of the runs it started.
 
 ## Team page
 

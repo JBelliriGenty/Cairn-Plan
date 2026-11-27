@@ -1035,7 +1035,7 @@ function currencies() {
     field("Shown in", code),
     field("Value of one dollar", table, "One currency per line: its code (EUR) and what one dollar is worth in it (0.92). Change the values when the rates move."),
     el("p", { class: "meta" }, m.fx_date ? t("Rates entered on {date}.", { date: day(m.fx_date) }) : t("Rates not entered yet: these are indicative values.")),
-    field("Price of a million tokens", prices, "One model per line: its name, then the dollars for a million tokens of input, output, cache read and cache write (1 hour). A run that reports no cost is estimated with it."),
+    field("Price of a million tokens", prices, "One model per line: its name, then the dollars for a million tokens of input, output, cache read and cache write (1 hour). A cache write kept 5 minutes counts 1.25 times the input price. A run that reports no cost, or that gives its tokens by model, is estimated with it."),
     el("p", { class: "meta" }, t("Prices dated {date}, read at {source}.", { date: day(m.prices_date), source: m.prices_source })),
     el("div", { class: "row" }, el("button", { class: "primary" }, t("Save"))));
 }
@@ -1371,8 +1371,15 @@ function verdict(g) {
   return [said && /^[1-9]\d* /.test(said.result) ? "warn" : "ok", said ? said.result : t("Done")];
 }
 
+// The models of a run: one that changed model on the way shows them all, the one with the most tokens first.
+function runModels(r) {
+  const size = m => (m.tokens_in || 0) + (m.tokens_out || 0);
+  const used = (r.models || []).filter(m => size(m) > 0).sort((a, b) => size(b) - size(a)).map(m => m.model);
+  return used.join(" + ") || r.model;
+}
+
 function runFacts(r) {
-  const out = [stamp(r.started), lasted(r), r.model, r.tokens_out != null && t("{n} tokens written", { n: r.tokens_out.toLocaleString(LOCALE()) }),
+  const out = [stamp(r.started), lasted(r), runModels(r), r.tokens_out != null && t("{n} tokens written", { n: r.tokens_out.toLocaleString(LOCALE()) }),
     r.cost_counted != null && (r.cost_estimated ? t("{a} (estimate)", { a: "≈ " + dollars(r.cost_counted) }) : dollars(r.cost_counted)), r.host];
   return out.filter(Boolean).join(" · ");
 }

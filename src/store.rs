@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS runs(
   project TEXT NOT NULL DEFAULT '', ticket TEXT NOT NULL DEFAULT '', task TEXT NOT NULL, state TEXT NOT NULL,
   model TEXT NOT NULL DEFAULT '', tokens_in INTEGER, tokens_out INTEGER, cost_usd REAL, started INTEGER NOT NULL,
   ended INTEGER, parent TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '', updated INTEGER NOT NULL,
-  tokens_cache_read INTEGER, tokens_cache_write INTEGER, PRIMARY KEY(login, run_id));
+  tokens_cache_read INTEGER, tokens_cache_write INTEGER, models TEXT NOT NULL DEFAULT '', PRIMARY KEY(login, run_id));
 CREATE INDEX IF NOT EXISTS runs_started ON runs(started);
 ";
 
@@ -140,6 +140,8 @@ pub fn open(path: &str) -> Connection {
         ))
         .expect("cannot rebuild the table of runs");
     }
+    // 0.37.1: the tokens of a run by model (JSON), 5-minute cache writes apart, to price each at its own rate
+    let _ = c.execute("ALTER TABLE runs ADD COLUMN models TEXT NOT NULL DEFAULT ''", []);
     // a rate without a currency was given in the one amounts are shown in: written down, so that a change of that currency leaves it alone
     let _ = c.execute("UPDATE users SET rate_currency = ?1 WHERE rate > 0 AND rate_currency = ''", params![display_currency(&c)]);
     c
@@ -946,7 +948,8 @@ pub fn my_money(c: &Connection, login: &str) -> Value {
 
 /// What a million tokens cost each model, in dollars: [input, output, cache read, cache write (1 hour)].
 /// Read on the official pricing page on 2026-11-24 (PRICES_SOURCE); an administrator adjusts them in the settings.
-/// Claude Code writes its cache for one hour. Haiku has a dearer tier above 100 000 tokens of prompt: not counted here.
+/// A session of Claude Code writes its cache for one hour, the agents it starts for 5 minutes (WRITE_5M).
+/// Haiku has a dearer tier above 100 000 tokens of prompt: not counted here.
 const DEFAULT_PRICES: [(&str, [f64; 4]); 4] = [
     ("claude-fable-5-2", [8.0, 40.0, 0.2, 16.0]),
     ("claude-opus-5-5", [4.0, 20.0, 0.2, 8.0]),
@@ -974,8 +977,25 @@ pub fn prices_table(c: &Connection) -> std::collections::BTreeMap<String, [f64; 
     saved.unwrap_or_else(|| DEFAULT_PRICES.iter().map(|(k, v)| (k.to_string(), *v)).collect())
 }
 
-/// What a run cost in dollars from its tokens, when its model is in the table and it has tokens.
+/// A cache write kept 5 minutes costs 1.25 times the input price, on every model (PRICES_SOURCE): no
+/// column of its own in the table, which holds the 1-hour price.
+const WRITE_5M: f64 = 1.25;
+
+/// What a run cost in dollars from its tokens. With "models" (its tokens by model), each part takes
+/// the price of its own model, and a model that is not in the table is left out (none in the
+/// table: no estimate); without, all its tokens take the price of its one model.
 fn estimate(prices: &std::collections::BTreeMap<String, [f64; 4]>, r: &Value) -> Option<f64> {
+    match r["models"].as_array().filter(|parts| !parts.is_empty()) {
+        Some(parts) => {
+            let known: Vec<f64> = parts.iter().filter_map(|p| estimate_one(prices, p)).collect();
+            (!known.is_empty()).then(|| known.iter().sum::<f64>())
+        }
+        None => estimate_one(prices, r),
+    }
+}
+
+/// The same for the tokens of one model, when it is in the table and has tokens.
+fn estimate_one(prices: &std::collections::BTreeMap<String, [f64; 4]>, r: &Value) -> Option<f64> {
     let model = r["model"].as_str().filter(|m| !m.is_empty())?;
     let p = prices.get(model).or_else(|| prices.iter().filter(|(k, _)| model.starts_with(k.as_str())).max_by_key(|(k, _)| k.len()).map(|(_, p)| p))?;
     let (tin, tout) = (r["tokens_in"].as_i64(), r["tokens_out"].as_i64());
@@ -985,17 +1005,21 @@ fn estimate(prices: &std::collections::BTreeMap<String, [f64; 4]>, r: &Value) ->
     let (tin, tout) = (tin.unwrap_or(0), tout.unwrap_or(0));
     let (read, write) = (r["tokens_cache_read"].as_i64().unwrap_or(0), r["tokens_cache_write"].as_i64().unwrap_or(0));
     let plain = (tin - read - write).max(0);
-    Some((plain as f64 * p[0] + tout as f64 * p[1] + read as f64 * p[2] + write as f64 * p[3]) / 1e6)
+    let short = r["tokens_cache_write_5m"].as_i64().unwrap_or(0).clamp(0, write.max(0)); // the part of `write` kept 5 minutes
+    Some((plain as f64 * p[0] + tout as f64 * p[1] + read as f64 * p[2] + (write - short) as f64 * p[3] + short as f64 * p[0] * WRITE_5M) / 1e6)
 }
 
 /// Adds to each run what it counts for: "cost_counted" (dollars, null when unknown) and
 /// "cost_estimated" (true when it comes from tokens, not from what the source reported). A run that
-/// reports no cost takes an estimate. A run that reports one (a session: everything it started
-/// included) loses the estimates of the runs it started, which are counted on their own: a sum
-/// over the runs counts nothing twice.
+/// reports no cost takes an estimate. So does a run that gives its tokens by model ("models"): they
+/// are its own tokens, complete, where the cost a session of Claude Code writes down starts again
+/// from zero each time its process restarts. Any other run that reports a cost (everything it
+/// started included) loses the estimates of the runs it started, which are counted on their own:
+/// a sum over the runs counts nothing twice.
 pub fn with_costs(c: &Connection, runs: &mut [Value]) {
     let prices = prices_table(c);
-    let est: Vec<Option<f64>> = runs.iter().map(|r| if r["cost_usd"].is_null() { estimate(&prices, r) } else { None }).collect();
+    let by_model = |r: &Value| r["models"].as_array().is_some_and(|parts| !parts.is_empty());
+    let est: Vec<Option<f64>> = runs.iter().map(|r| if r["cost_usd"].is_null() || by_model(r) { estimate(&prices, r) } else { None }).collect();
     let mut kids: std::collections::HashMap<String, f64> = Default::default();
     for (r, e) in runs.iter().zip(&est) {
         if let (Some(e), Some(parent)) = (e, r["parent"].as_str().filter(|p| !p.is_empty())) {
@@ -1003,13 +1027,14 @@ pub fn with_costs(c: &Connection, runs: &mut [Value]) {
         }
     }
     for (r, e) in runs.iter_mut().zip(est) {
-        let (counted, estimated) = match (r["cost_usd"].as_f64(), e) {
-            (Some(raw), _) => {
+        let (counted, estimated) = match (e, r["cost_usd"].as_f64()) {
+            (Some(e), _) => (Some(e), true), // its own tokens: what it started is not in them
+            (None, Some(_)) if by_model(&*r) => (None, false), // no model of its list in the table: unknown, not the cost it wrote down
+            (None, Some(raw)) => {
                 let key = format!("{}\0{}", r["login"].as_str().unwrap_or(""), r["run_id"].as_str().unwrap_or(""));
                 let k = kids.get(&key).copied().unwrap_or(0.0);
                 (Some((raw - k).max(0.0)), k > 0.0)
             }
-            (None, Some(e)) => (Some(e), true),
             _ => (None, false),
         };
         r["cost_counted"] = json!(counted);
@@ -1614,12 +1639,14 @@ pub fn search(c: &Connection, a: &Actor, q: &str, key: &str) -> R<Value> {
 
 const RUN_STATES: [&str; 4] = ["running", "ok", "failed", "waiting"];
 const RUN_COLS: &str = "run_id, login, agent, source, host, project, ticket, task, state, model, tokens_in, tokens_out, cost_usd, \
-                        started, ended, parent, result, updated, tokens_cache_read, tokens_cache_write";
+                        started, ended, parent, result, updated, tokens_cache_read, tokens_cache_write, models";
 /// Fields a client may send, besides "run_id"; what a later send leaves out is kept.
-const RUN_FIELDS: [&str; 17] = [
+const RUN_FIELDS: [&str; 18] = [
     "agent", "source", "host", "project", "ticket", "task", "state", "model", "tokens_in", "tokens_out", "cost_usd", "started", "ended",
-    "parent", "result", "tokens_cache_read", "tokens_cache_write",
+    "parent", "result", "tokens_cache_read", "tokens_cache_write", "models",
 ];
+/// The counts of one model in "models": the same names and meaning as those of a run, plus the part of the cache writes kept 5 minutes.
+const MODEL_COUNTS: [&str; 5] = ["tokens_in", "tokens_out", "tokens_cache_read", "tokens_cache_write", "tokens_cache_write_5m"];
 
 fn run_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -1630,7 +1657,33 @@ fn run_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
         "cost_usd": r.get::<_, Option<f64>>(12)?, "started": r.get::<_, i64>(13)?, "ended": r.get::<_, Option<i64>>(14)?,
         "parent": r.get::<_, String>(15)?, "result": r.get::<_, String>(16)?, "updated": r.get::<_, i64>(17)?,
         "tokens_cache_read": r.get::<_, Option<i64>>(18)?, "tokens_cache_write": r.get::<_, Option<i64>>(19)?,
+        "models": serde_json::from_str::<Value>(&r.get::<_, String>(20)?).unwrap_or(Value::Null),
     }))
+}
+
+/// "models" of a run as it is stored: the tokens of each model, nothing else. 20 models at most; a count left out is 0.
+fn run_models(v: &Value) -> R<String> {
+    let parts = match v {
+        Value::Null => return Ok(String::new()),
+        Value::Array(parts) if parts.len() <= 20 => parts,
+        _ => return bad("models: a list of 20 models at most"),
+    };
+    let mut out = Vec::new();
+    for p in parts {
+        if !p.is_object() {
+            return bad("models: each one is an object with a model and its tokens");
+        }
+        let mut one = json!({"model": run_text(p, "model", 60, true)?});
+        for k in MODEL_COUNTS {
+            let n: i64 = match &p[k] {
+                Value::Null => 0,
+                n => n.as_i64().filter(|n| (0..=1_000_000_000_000).contains(n)).ok_or((400, format!("models: {k}: a whole number, 0 to 1000000000000")))?,
+            };
+            one[k] = json!(n);
+        }
+        out.push(one);
+    }
+    Ok(if out.is_empty() { String::new() } else { Value::Array(out).to_string() })
 }
 
 fn valid_ticket_id(s: &str) -> bool {
@@ -1708,6 +1761,7 @@ pub fn report_run(c: &Connection, a: &Actor, v: &Value) -> R<Value> {
     };
     let (tokens_in, tokens_out) = (int("tokens_in", 1_000_000_000_000)?, int("tokens_out", 1_000_000_000_000)?);
     let (cache_read, cache_write) = (int("tokens_cache_read", 1_000_000_000_000)?, int("tokens_cache_write", 1_000_000_000_000)?);
+    let models = run_models(&m["models"])?;
     let cost = match &m["cost_usd"] {
         Value::Null => None,
         n => Some(n.as_f64().filter(|n| (0.0..=1_000_000.0).contains(n)).ok_or((400, "cost_usd: a number, 0 to 1000000".to_string()))?),
@@ -1724,12 +1778,12 @@ pub fn report_run(c: &Connection, a: &Actor, v: &Value) -> R<Value> {
     }
     db(c.execute(
         &format!(
-            "INSERT INTO runs({RUN_COLS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
+            "INSERT INTO runs({RUN_COLS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)
              ON CONFLICT(login, run_id) DO UPDATE SET agent=?3, source=?4, host=?5, project=?6, ticket=?7, task=?8, state=?9, model=?10,
                tokens_in=?11, tokens_out=?12, cost_usd=?13, started=?14, ended=?15, parent=?16, result=?17, updated=?18,
-               tokens_cache_read=?19, tokens_cache_write=?20"
+               tokens_cache_read=?19, tokens_cache_write=?20, models=?21"
         ),
-        params![run_id, owner, agent, source, host, project, ticket, task, state, model, tokens_in, tokens_out, cost, started, ended, parent, result, now(), cache_read, cache_write],
+        params![run_id, owner, agent, source, host, project, ticket, task, state, model, tokens_in, tokens_out, cost, started, ended, parent, result, now(), cache_read, cache_write, models],
     ))?;
     db(c.query_row(&format!("SELECT {RUN_COLS} FROM runs WHERE run_id = ?1 AND login = ?2"), params![run_id, owner], run_json))
 }
@@ -2821,6 +2875,11 @@ mod tests {
         assert_eq!(with("project", json!("BLOG")), 400); // the ticket is SHOP-1
         assert_eq!(with("cost_usd", json!(-1)), 400);
         assert_eq!(with("tokens_in", json!(1.5)), 400);
+        assert_eq!(with("models", json!("claude-opus-5-5")), 400);
+        assert_eq!(with("models", json!(["claude-opus-5-5"])), 400);
+        assert_eq!(with("models", json!([{"tokens_in": 5}])), 400); // no model
+        assert_eq!(with("models", json!([{"model": "m", "tokens_out": -1}])), 400);
+        assert_eq!(with("models", json!(vec![json!({"model": "m"}); 21])), 400);
         assert_eq!(with("started", json!(0)), 400);
         assert_eq!(with("ended", json!(5)), 400);
         assert_eq!(report_run(&c, &lea, &json!({"run_id": "", "agent": "a"})).unwrap_err().0, 400);
@@ -2975,6 +3034,45 @@ mod tests {
         let (m, a2) = (my_money(&c, "lea"), list(&c)["a"].clone());
         assert_eq!(m["prices_date"].as_str(), Some(date_of(now()).as_str()));
         assert!((a2["cost_counted"].as_f64().unwrap() - (300_000.0 * 1.0 + 100_000.0 * 2.0) / 1e6).abs() < 1e-9, "{a2}");
+    }
+    #[test]
+    fn tokens_by_model_take_each_their_price_and_replace_the_cost_a_session_wrote_down() {
+        let c = setup();
+        let (jane, lea) = (who("jane", true), who("lea", false));
+        let at = now() - 3600;
+        let send = |v: Value| report_run(&c, &lea, &v).unwrap();
+        // a session on two models, restarted once: the cost it wrote down (1 dollar) covers its last hours only
+        let s = send(json!({"run_id": "s", "agent": "session", "source": "claude-code", "task": "t", "state": "ok", "started": at, "ended": at + 1200,
+            "model": "claude-opus-5-5", "cost_usd": 1.0, "tokens_in": 2_000_000, "tokens_out": 100_000, "tokens_cache_read": 600_000, "tokens_cache_write": 300_000,
+            "models": [
+                {"model": "claude-opus-5-5", "tokens_in": 1_000_000, "tokens_out": 100_000, "tokens_cache_read": 600_000, "tokens_cache_write": 300_000,
+                 "tokens_cache_write_5m": 100_000, "text": "dropped"},
+                {"model": "claude-haiku-5-5", "tokens_in": 1_000_000},
+                {"model": "model-of-tomorrow", "tokens_in": 1_000_000}]}));
+        // stored: the counts only, a count left out is 0
+        assert_eq!(s["models"][1], json!({"model": "claude-haiku-5-5", "tokens_in": 1_000_000, "tokens_out": 0, "tokens_cache_read": 0, "tokens_cache_write": 0, "tokens_cache_write_5m": 0}));
+        assert!(s["models"][0]["text"].is_null());
+        // an agent of it, on its own tokens: every cache write kept 5 minutes
+        send(json!({"run_id": "a", "agent": "ouvrier", "source": "claude-code", "task": "t", "state": "ok", "started": at, "ended": at + 600, "parent": "s",
+            "model": "claude-haiku-5-5", "tokens_in": 1_000_000, "tokens_out": 100_000, "tokens_cache_read": 600_000, "tokens_cache_write": 100_000,
+            "models": [{"model": "claude-haiku-5-5", "tokens_in": 1_000_000, "tokens_out": 100_000, "tokens_cache_read": 600_000, "tokens_cache_write": 100_000,
+                        "tokens_cache_write_5m": 100_000}]}));
+        let list = |c: &Connection| -> std::collections::HashMap<String, Value> {
+            runs(c, &jane, "", "", "").unwrap().as_array().unwrap().iter().map(|r| (r["run_id"].as_str().unwrap().to_string(), r.clone())).collect()
+        };
+        let by = list(&c);
+        // opus: 100k plain 0.4 + 100k output 2.0 + 600k read 0.12 + 200k written for 1 hour 1.6 + 100k written for 5 minutes 0.5;
+        // haiku: 1M plain 0.1; the model that is not in the table is left out. Not the dollar written down, and the agent is not taken off.
+        assert!((by["s"]["cost_counted"].as_f64().unwrap() - 4.72).abs() < 1e-9 && by["s"]["cost_estimated"] == true, "{}", by["s"]);
+        // haiku: 300k plain 0.03 + 100k output 0.05 + 600k read 0.006 + 100k written for 5 minutes 0.0125 (0.02 for 1 hour)
+        assert!((by["a"]["cost_counted"].as_f64().unwrap() - 0.0985).abs() < 1e-9, "{}", by["a"]);
+        // a later report without "models" keeps them
+        let again = send(json!({"run_id": "s", "state": "ok"}));
+        assert_eq!(again["models"].as_array().map(Vec::len), Some(3));
+        // no model of the list in the table: no cost, rather than the partial one written down
+        send(json!({"run_id": "x", "agent": "session", "source": "claude-code", "task": "t", "state": "ok", "started": at, "ended": at + 60, "cost_usd": 2.0,
+                    "models": [{"model": "model-of-tomorrow", "tokens_in": 5}]}));
+        assert_eq!((list(&c)["x"]["cost_counted"].clone(), list(&c)["x"]["cost_estimated"].as_bool()), (Value::Null, Some(false)));
     }
     #[test]
     fn the_longest_prefix_gives_the_price_and_an_empty_table_is_refused() {

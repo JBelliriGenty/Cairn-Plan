@@ -236,8 +236,8 @@ const DICT = {
     "{a} (estimate)": "{a} (estimé)", "Hourly rate: not measured yet": "Taux horaire : pas encore mesuré",
     "Rates entered on {date}.": "Cours saisis le {date}.", "Rates not entered yet: these are indicative values.": "Cours pas encore saisis : ce sont des valeurs indicatives.",
     "Price of a million tokens": "Prix d'un million de jetons",
-    "One model per line: its name, then the dollars for a million tokens of input, output, cache read and cache write (1 hour). A run that reports no cost is estimated with it.":
-      "Un modèle par ligne : son nom, puis les dollars pour un million de jetons en entrée, en sortie, en lecture de cache et en écriture de cache (1 heure). Un run qui ne donne pas son coût est estimé avec ce tableau.",
+    "One model per line: its name, then the dollars for a million tokens of input, output, cache read and cache write (1 hour). A cache write kept 5 minutes counts 1.25 times the input price. A run that reports no cost, or that gives its tokens by model, is estimated with it.":
+      "Un modèle par ligne : son nom, puis les dollars pour un million de jetons en entrée, en sortie, en lecture de cache et en écriture de cache (1 heure). Une écriture de cache gardée 5 minutes compte 1,25 fois le prix d'entrée. Un run qui ne donne pas son coût, ou qui donne ses jetons par modèle, est estimé avec ce tableau.",
     "Prices dated {date}, read at {source}.": "Prix du {date}, lus sur {source}.", "invalid prices": "tarifs invalides",
     // agents page
     "24 hours": "24 heures", "No agent at work": "Aucun agent au travail",
