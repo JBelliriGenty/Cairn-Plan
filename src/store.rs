@@ -774,10 +774,14 @@ pub fn ticket_view(c: &Connection, a: &Actor, id: &str) -> R<Value> {
     Ok(t)
 }
 
+/// The longest comment, in bytes: a whole review of an agent (SHOP-96 lost its rules at 10 000 bytes,
+/// 2026-11-26). Comments, reports of finish_ticket and questions of wait_ticket all go through here.
+pub const MAX_COMMENT: usize = 500_000;
+
 pub fn comment(c: &Connection, a: &Actor, id: &str, v: &Value) -> R<Value> {
     let (_, _, tid) = ticket(c, a, id)?;
     let body = text(v, "body").unwrap_or_default();
-    if body.is_empty() || body.len() > 10_000 {
+    if body.is_empty() || body.len() > MAX_COMMENT {
         return bad("invalid comment");
     }
     db(c.execute("INSERT INTO comments(ticket, author, body, created) VALUES (?1, ?2, ?3, ?4)", params![tid, a.name(), body, now()]))?;
@@ -2208,6 +2212,9 @@ mod tests {
         assert_eq!(create_ticket(&c, &lea, "SHOP", &json!({"title": "x", "state": "todo"})).unwrap_err().0, 403);
         assert_eq!(create_ticket(&c, &lea, "SHOP", &json!({"title": "Idea"})).unwrap()["id"], "SHOP-1");
         comment(&c, &tom, "SHOP-1", &json!({"body": "nice"})).unwrap();
+        // a whole review fits in one comment (SHOP-96 lost its rules at 10 000 bytes); past the limit, refused
+        comment(&c, &tom, "SHOP-1", &json!({"body": "é".repeat(MAX_COMMENT / 2)})).unwrap();
+        assert_eq!(comment(&c, &tom, "SHOP-1", &json!({"body": "x".repeat(MAX_COMMENT + 1)})).unwrap_err().0, 400);
         // she edits her idea, but cannot approve it, directly or by skipping "todo"
         update_ticket(&c, &lea, "SHOP-1", &json!({"description": "v1", "priority": "high"})).unwrap();
         for state in ["todo", "in_progress", "done"] {

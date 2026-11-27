@@ -77,8 +77,9 @@ secret, and "Send a test": the agent answers.
 | `AGENT_GIT_USER` | `x-access-token` | User name sent with the token (GitHub accepts the default; Forgejo wants the account name). |
 | `AGENT_GIT_NAME`, `AGENT_GIT_EMAIL` | `Cairn Plan agent`, `agent@localhost` | Author of the commits. |
 | `AGENT_REPOS` | required | JSON, one entry per project key: `repo` (https clone address), `push` (where the branch goes; a fork; default: `repo`), `base` (branch the pull request targets; default: the default branch). A ticket of a project that is not listed is left alone. |
-| `AGENT_DAILY_TICKETS` | `10` | Tickets taken per day. Beyond, tickets stay "To do". |
-| `AGENT_DAILY_USD` | `20` | Daily budget, in dollars at API prices as Claude Code reports them for each run (on a subscription nothing is billed: it is the measure of quota a run gives). Beyond, tickets stay "To do". |
+| `AGENT_NIGHT` | `{}` | JSON `{"start": 23, "end": 7, "factor": 2}`: from `start` to `end` (local hours of `AGENT_TZ`, across midnight when start > end) each role's budget is multiplied by `factor`. Day and night are two windows, each from zero. `{}`: one window a day. |
+| `AGENT_TZ` | `Europe/Paris` | Time zone of those hours (the container itself may run in UTC). |
+| `AGENT_DAILY_USD` | `20` | Budget of a window, in dollars at API prices as Claude Code reports them for each run (on a subscription nothing is billed: it is the measure of quota a run gives). Beyond, tickets stay "To do". |
 | `AGENT_MODEL` | Claude Code's | Model, e.g. `sonnet`. |
 | `AGENT_MAX_TURNS` | `150` | Turns of one run. |
 | `AGENT_TIMEOUT_MIN` | `60` | Minutes of one run. |
@@ -106,6 +107,9 @@ use another file); `AGENT_TEAMS` picks them per project:
   "doc": {"model": "claude-sonnet-5-5", "usd": 4}}}}
 ```
 
+There is no cap of tickets: the dollars of the window are the one limit.
+A role name shares one budget across teams.
+
 A role may also carry a `note`: text that only this project's team needs
 (a check to run one at a time, say). It is added to the role's text of
 `team.json`, so the common texts name no project.
@@ -132,7 +136,13 @@ its account (`{"agent-dev": "claude-dev"}`), and `cairn-plan member
    forge grants rights per repository, not per folder, so this check is
    the limit. A file outside: no push, no pull request, the ticket waits
    with the list.
-3. A role that `waits` (the writer) starts once the other parts are
+3. A role marked `first` (the reviewers `juriste` and `dpo`, template
+   [prompt-avis.md](prompt-avis.md)) goes before every part of another role
+   under the same parent. It reads only, changes no file (no paths), may
+   open official legal sites only (`WebFetch(domain:...)` in `allowed`),
+   and its report is a written opinion the other agents read with
+   `get_ticket`. A review waiting for the owner holds the other parts too.
+   A role that `waits` (the writer) starts once the other parts are
    closed, and finds their branches in its clone (`origin/agent/<id>`).
    Each closed part, whoever closed it (an agent or a person), sends
    `ticket.closed`: the waiting part starts then, not at the next catch-up.
@@ -175,9 +185,22 @@ cost of its run.
   container has. It can read its own Claude token and the MCP key. Keep the
   container on a network that reaches the forge, Cairn Plan and Anthropic,
   and little else, and approve tickets with that in mind.
-- It builds and tests with what the image holds: git, Python, a shell. A
-  project that needs a toolchain to be checked relies on the CI of the pull
-  request, or on an image built `FROM` this one with the toolchain added.
+- The image holds git, Python and a shell, plus the Debian packages named
+  at build time: `--build-arg EXTRA_PACKAGES="openjdk-17-jdk-headless unzip"`
+  for what only root can install. Claude installs the rest of the toolchain a
+  check needs in its home folder, `/work/w/home`. The folder is kept from
+  one ticket to the next, and `~/TOOLS.md` lists what it holds. When the
+  volume has less than 10 GB free, the agent empties it. The folder is one
+  for all tickets and all projects: a ticket reads and changes what the
+  ticket before left there (tools, shell profile). The checks of the agent
+  itself (rules, diff, push) run as root and read nothing from it.
+- `/tmp` is a link to `/work/w/tmp`, emptied after each ticket. Nothing a
+  ticket installs or builds is written in the container. Keep `AGENT_WORK`
+  at `/work`, and give the volume 20 GB or more.
+- A ticket whose agent role is `routine` is never taken, team or not: it
+  stays "To do" for a person or another tool. Use it for work the agent
+  cannot do (a host to reach, a CI workflow, a deployment). An owner
+  writes it in the "Agent" field; `propose_ticket` takes it as `role`.
 - A call that arrives while the container is down is lost, and so is one
   refused by the daily cap or budget. The agent catches up when it starts
   and whenever nothing came for `AGENT_SWEEP_MIN` minutes: it takes the

@@ -1,5 +1,80 @@
 # Changelog
 
+## 0.37.0 (2026-11-27)
+
+- New key `search_origins`: pages of other sites that may read
+  `GET /api/search` with the session of the person (CORS with credentials, on
+  that route only; no preflight is answered, so POST stays closed). Cairn Doc
+  uses it to show the tickets of a doc.
+
+## 0.36.0 (2026-11-27)
+
+- Agent: no cap of tickets any more (`AGENT_DAILY_TICKETS` removed); the
+  dollars are the one limit. The budget has two windows a day: by day each
+  role's budget, by night (`AGENT_NIGHT`, hours of `AGENT_TZ`) that budget
+  times a factor. Each window starts from zero; `/status` and the agent page
+  show the window.
+
+## 0.35.1
+
+- A comment, the report of `finish_ticket` and the question of
+  `wait_ticket` may hold 500 000 bytes (10 000 before): a whole review of
+  an agent fits in one comment. Requests to the MCP server and to the API
+  are read up to 2 000 000 bytes. Notifications still carry the first 300
+  characters.
+
+## 0.35.0
+
+- MCP: `set_role` sets the agent role of a proposed ticket ("backlog"),
+  `routine` included. Refused once the ticket is approved.
+- Agent image: the build argument `EXTRA_PACKAGES` adds Debian packages
+  that only root can install (a JDK, a C compiler). Empty by default.
+
+## 0.34.0
+
+- Agent role `routine`: a ticket whose "Agent" field says `routine` is
+  never taken by the agent. It stays "To do" with nobody on it, for a
+  session or another tool. Use it for work the agent cannot do: a host to
+  reach, a CI workflow, a deployment.
+- MCP: `propose_ticket` takes an optional `role`, so that a session marks
+  such a ticket when it proposes it.
+
+## 0.33.1
+
+- Agent: the home folder of the worker and `/tmp` are in the work volume
+  (`/work/w/home`, `/work/w/tmp`), no longer in the container. The tools
+  Claude installs for the checks of a ticket (a compiler, a database, an
+  SDK) are kept for the next ticket; `~/TOOLS.md` lists them. `/tmp` and
+  the conversation of Claude Code are emptied after each ticket. Under
+  10 GB free in the volume, the tools go too.
+
+## 0.33.0
+
+- Team page: seven new drawings for the `look` of a member: `tie`, `coins`,
+  `chart`, `scroll`, `horns`, `gavel`, `quill`.
+
+## 0.32.1
+
+- Agent: a ticket left "in progress" on the account of a role by a restart
+  (its run is lost) is taken again by the sweep, at start-up and after an
+  hour without a call. The role moves it to "waiting" with a comment that
+  says why, then takes it again, from its branch if it pushed one. The
+  lead's ticket is taken again only if it has no sub-ticket yet. A role
+  out of budget leaves it in progress for the next sweep. Only the
+  accounts of the roles (`claude-<role>`) are swept, never the agent's own
+  account, which the sessions share.
+- Agent: an error just after a ticket is taken (before its work starts) no
+  longer leaves the ticket "in progress" with nobody on it.
+
+## 0.32.0
+
+- Team page: it reads again every 10 seconds (was 20), only while the tab is
+  visible, and at once when you come back to it.
+- Team page: a run whose agent no member takes now shows on a neutral card,
+  "Others" (added only when a team is set and such runs exist). A member with
+  the `id` `others` replaces it.
+- Team page: the result "non conforme" is drawn as a warning, like a gap.
+
 ## 0.31.1
 
 - A run reported through an OAuth token (the Claude of a member) is now stored

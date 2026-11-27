@@ -56,7 +56,12 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "required": ["project", "title"], "properties": {
              "project": {"type": "string", "description": "Project key, e.g. APP"},
              "title": {"type": "string", "description": "One line: what is asked"},
-             "description": {"type": "string", "description": "Details: goal, context, what done looks like"}}}},
+             "description": {"type": "string", "description": "Details: goal, context, what done looks like"},
+             "role": {"type": "string", "description": "Who builds it once approved. Leave it out for work inside the project's repository. \"routine\": work the instance's agent cannot do (a host to reach, a CI workflow, a deployment); no agent takes it, a session or the night routine does. Lower case, digits, . _ -, 20 characters at most."}}}},
+        {"name": "set_role", "description": "Set who builds a proposed ticket (state \"backlog\") once it is approved; see \"role\" of propose_ticket. Refused on any other state: the role is part of what the project owner approved.",
+         "inputSchema": {"type": "object", "required": ["id"], "properties": {
+             "id": {"type": "string", "description": "Ticket id, e.g. APP-12"},
+             "role": {"type": "string", "description": "A role of this project's agents, or \"routine\"; empty or left out: the default"}}}},
         {"name": "create_subticket", "description": "Split a ticket you took (\"in_progress\", assigned to this account) into sub-tickets of the same project. Its approval covers them: they start \"todo\", and the agent of their role takes them. Only parts of what the parent asks, never more: whoever builds a sub-ticket checks it against the parent. One level, at most 8 per ticket.",
          "inputSchema": {"type": "object", "required": ["parent", "title", "role"], "properties": {
              "parent": {"type": "string", "description": "Id of the ticket being split, e.g. APP-70"},
@@ -175,8 +180,15 @@ fn call(c: &Connection, who: &Actor, tool: &str, a: &Value) -> R<Value> {
             c,
             who,
             arg(a, "project")?,
-            &json!({"title": arg(a, "title")?, "description": a["description"].as_str().unwrap_or("")}),
+            &json!({"title": arg(a, "title")?, "description": a["description"].as_str().unwrap_or(""), "agent": a["role"].as_str().unwrap_or("")}),
         ),
+        "set_role" => {
+            let id = arg(a, "id")?;
+            if store::ticket_view(c, who, id)?["state"] != "backlog" {
+                return Err((409, "only a proposal (state \"backlog\") can change role".into()));
+            }
+            store::update_ticket(c, who, id, &json!({"agent": a["role"].as_str().unwrap_or("")}))
+        }
         "create_subticket" => {
             let parent = arg(a, "parent")?;
             let key = parent.rsplit_once('-').map_or("", |(k, _)| k);
@@ -279,7 +291,7 @@ mod tests {
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
         assert!(handle(&c, &claude, &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).is_none());
         let list = handle(&c, &claude, &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 14);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 15);
         assert_eq!(handle(&c, &claude, &json!({"jsonrpc": "2.0", "id": 3, "method": "nope"})).unwrap()["error"]["code"], -32601);
 
         // it only sees the projects it was added to
@@ -318,6 +330,16 @@ mod tests {
         // a follow-up is a proposal, never an approved ticket
         let new = ok(&c, &claude, "propose_ticket", json!({"project": "SHOP", "title": "Follow-up"}));
         assert_eq!(ok(&c, &claude, "get_ticket", json!({"id": new["id"]}))["approval"], Value::Null);
+        // work the agent cannot do is marked for the routine when it is proposed
+        let infra = ok(&c, &claude, "propose_ticket", json!({"project": "SHOP", "title": "Deploy", "role": "routine"}));
+        assert_eq!(ok(&c, &claude, "get_ticket", json!({"id": infra["id"]}))["agent"], "routine");
+        // or afterwards, while it is still a proposal
+        ok(&c, &claude, "set_role", json!({"id": new["id"], "role": "routine"}));
+        assert_eq!(ok(&c, &claude, "get_ticket", json!({"id": new["id"]}))["agent"], "routine");
+        ok(&c, &claude, "set_role", json!({"id": new["id"]}));
+        assert_eq!(ok(&c, &claude, "get_ticket", json!({"id": new["id"]}))["agent"], "");
+        assert!(refused(&c, &claude, "set_role", json!({"id": "SHOP-2", "role": "routine"})).contains("backlog"));
+        assert!(refused(&c, &claude, "set_role", json!({"id": new["id"], "role": "Not Valid"})).contains("invalid agent"));
         assert!(refused(&c, &claude, "comment_ticket", json!({"id": "SHOP-2"})).contains("missing argument"));
 
         // a question to the owner: it waits on them and cannot be taken

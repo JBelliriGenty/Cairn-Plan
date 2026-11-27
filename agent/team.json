@@ -1,5 +1,5 @@
 {
-  "_": "Roles a project team may use (AGENT_TEAMS picks them per project, with model, budget, MCP key and, if the project needs one, a note added to the role text; the paths below hold for every project, rules.json too). allowed: tools of Claude Code. paths: what the role may change, checked by agent.py on the diff before any push (a pattern with a / against the whole path, one without against the file name; * also crosses folders); no paths key: the whole repository. splits: the role splits its ticket into sub-tickets and builds nothing. waits: the role starts once the other parts of the same parent are closed. text: the role, told to Claude.",
+  "_": "Roles a project team may use (AGENT_TEAMS picks them per project, with model, budget, MCP key and, if the project needs one, a note added to the role text; the paths below hold for every project, rules.json too). allowed: tools of Claude Code. paths: what the role may change, checked by agent.py on the diff before any push (a pattern with a / against the whole path, one without against the file name; * also crosses folders); no paths key: the whole repository. splits: the role splits its ticket into sub-tickets and builds nothing. waits: the role starts once the other parts of the same parent are closed. first: a review role (lawyer, DPO); every part of another role under the same parent starts once the parts of these roles are closed, so that it reads their opinion. prompt: the template of the role (default prompt.md). text: the role, told to Claude.",
   "roles": {
     "chef": {
       "prompt": "prompt-chef.md",
@@ -22,6 +22,30 @@
       "paths": ["*.md", "docs/*"],
       "waits": true,
       "text": "Writer: writes the documentation (Markdown files, docs/) of what the other parts built, and changes nothing else: any other file stops the pull request. Their branches are in the clone as origin/agent/<id> (git diff origin/HEAD...origin/agent/<id>), already merged or not."
+    },
+    "juriste": {
+      "prompt": "prompt-avis.md",
+      "allowed": ["Read", "Glob", "Grep",
+                  "WebFetch(domain:legifrance.gouv.fr)", "WebFetch(domain:www.legifrance.gouv.fr)",
+                  "WebFetch(domain:eur-lex.europa.eu)", "WebFetch(domain:www.economie.gouv.fr)",
+                  "WebFetch(domain:www.service-public.fr)", "WebFetch(domain:www.cnil.fr)", "WebFetch(domain:cnil.fr)",
+                  "mcp__plan__get_ticket", "mcp__plan__comment_ticket", "mcp__plan__wait_ticket", "mcp__plan__propose_ticket"],
+      "denied": ["Bash", "Edit", "Write"],
+      "paths": [],
+      "first": true,
+      "text": "Lawyer (French digital and consumer law), reads only: legal notices, terms of use and of sale, the buying path, offers and subscriptions, commercial e-mails, licences of the dependencies, terms of third-party APIs, services used by children, use of AI. Says first whom the service is for (consumers, professionals) and what that changes. Never invents what only the company knows (legal form, SIREN, VAT, publication director, mediator): lists it as missing. Personal data questions belong to the dpo role: point them out, do not settle them. Report: scope read; whom the service is for; findings from the most serious (level, fact with file or page, article with address, correction); what the company must provide; what a lawyer must validate before release."
+    },
+    "dpo": {
+      "prompt": "prompt-avis.md",
+      "allowed": ["Read", "Glob", "Grep",
+                  "WebFetch(domain:www.cnil.fr)", "WebFetch(domain:cnil.fr)", "WebFetch(domain:legifrance.gouv.fr)",
+                  "WebFetch(domain:www.legifrance.gouv.fr)", "WebFetch(domain:www.edpb.europa.eu)", "WebFetch(domain:edpb.europa.eu)",
+                  "WebFetch(domain:eur-lex.europa.eu)",
+                  "mcp__plan__get_ticket", "mcp__plan__comment_ticket", "mcp__plan__wait_ticket", "mcp__plan__propose_ticket"],
+      "denied": ["Bash", "Edit", "Write"],
+      "paths": [],
+      "first": true,
+      "text": "Data protection officer (GDPR, French and European law), reads only: what the code, the database schema and the pages collect, keep or send. Grid: purpose and minimisation (art. 5), legal basis per processing (art. 6-7), minors (art. 8; 15 years in France), sensitive data such as health (art. 9), information (art. 12-14), rights and their path (art. 15-22), processors and their contracts (art. 28), transfers outside the EU (art. 44-49), retention and a real purge in the code (art. 5), security (art. 32), record of processing (art. 30), DPIA (art. 35 and the CNIL list: minors, sensitive data, systematic monitoring, large scale), breach notification (art. 33-34), trackers (art. 82 of the French law), AI. Never writes a real personal data value: cites the table and the column. Report: scope read; table of the processings found (data, purpose, legal basis, retention, processor); findings from the most serious (level, fact with file and line, text with address, correction); what a professional must validate; documents to write or update (record, policy, DPIA, contracts). When a DPIA is required, the report holds its draft: description, necessity and proportionality, risks, measures."
     }
   }
 }

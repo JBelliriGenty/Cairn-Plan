@@ -33,7 +33,8 @@ const DICT = {
     "Milestone": "Jalon", "All milestones": "Tous les jalons", "No milestone": "Sans jalon",
     "A family of tickets: a phase, a version.": "Une famille de tickets : une phase, une version.",
     "invalid milestone": "nom de jalon trop long",
-    "Agent": "Agent", "The agent role that builds it (dev, doc); empty: the project lead.": "Le rôle de l'agent qui le réalise (dev, doc) ; vide : le chef de projet.",
+    "Agent": "Agent", "The agent role that builds it (dev, doc); empty: the project lead; routine: no agent takes it, a session or the night routine does.":
+      "Le rôle de l'agent qui le réalise (dev, doc) ; vide : le chef de projet ; routine : aucun agent ne le prend, une session ou la routine de nuit le réalise.",
     "Sub-tickets": "Sous-tickets", "Sub-ticket of": "Sous-ticket de", "Sub-tickets done": "Sous-tickets terminés",
     "{done} of {total} sub-tickets done": "{done} sous-tickets terminés sur {total}",
     "invalid agent": "rôle d'agent invalide (minuscules, chiffres, . _ -)",
@@ -192,7 +193,7 @@ const DICT = {
     "The agent does not answer: {error}": "L'agent ne répond pas : {error}",
     "The agent works on": "L'agent travaille sur", "The agent has no ticket in hand.": "L'agent n'a aucun ticket en main.",
     "{n} ticket waits for the agent.": "{n} ticket attend l'agent.", "{n} tickets wait for the agent.": "{n} tickets attendent l'agent.",
-    "Stopped until tomorrow: {roles}.": "Arrêté jusqu'à demain : {roles}.", "Today": "Aujourd'hui", "Last lines": "Dernières lignes",
+    "Stopped until the next window: {roles}.": "Arrêté jusqu'à la prochaine plage : {roles}.", "night": "nuit", "Today": "Aujourd'hui", "Last lines": "Dernières lignes",
     "only an administrator can see the agent": "seul un administrateur voit l'agent",
     "Create and approve": "Créer et valider", "Export": "Exporter", "Add as a proposal": "Ajouter comme proposition",
     "Create and approve: the ticket is ready to be done at once. A proposal waits for your approval.":
@@ -252,7 +253,7 @@ const DICT = {
       "Ce que font les agents, en combien de temps et pour quel coût. Chaque agent envoie lui-même ses exécutions.",
     // team page (/team)
     "{n} s": "{n} s", "{n} min": "{n} min", "{n} h": "{n} h", "{n} d": "{n} j",
-    "Working · for {t}": "Au travail · depuis {t}", "No news for {t}": "Sans nouvelles depuis {t}", "Resting": "Au repos",
+    "Working · for {t}": "Au travail · depuis {t}", "No news for {t}": "Sans nouvelles depuis {t}", "Resting": "Au repos", "Others": "Autres", "Agents that no member takes": "Agents qu'aucun membre ne prend",
     "Last run {t} ago": "Dernière exécution il y a {t}", "No run yet.": "Aucune exécution pour l'instant.",
     "No team is configured. An administrator lists the members in the \"team\" key of the configuration file.":
       "Aucune équipe n'est configurée. Un administrateur liste ses membres dans la clé « team » du fichier de configuration.",
@@ -266,14 +267,14 @@ const DICT = {
     "{x} per hour over 30 days": "{x} de l'heure sur 30 jours", "Close": "Fermer",
     "What it did": "Ce qu'il a fait", "Latest first, with the verdict of the check.": "Du plus récent au plus ancien, avec le verdict du contrôle.",
     "In its queue": "Dans sa file", "What it will take next, in order.": "Ce qu'il prendra ensuite, dans l'ordre.",
-    "Cairn Plan does not answer. The page tries again in 20 seconds.": "Cairn Plan ne répond pas. La page réessaie dans 20 secondes.",
+    "Cairn Plan does not answer. The page tries again in 10 seconds.": "Cairn Plan ne répond pas. La page réessaie dans 10 secondes.",
     "No run in the last 24 hours: nothing to replay.": "Aucune exécution ces dernières 24 heures : rien à rejouer.",
     "Replay of the last 24 hours, in one minute.": "Rejeu des dernières 24 heures, en une minute.",
     "Today: {n} run": "Aujourd'hui : {n} exécution", "Today: {n} runs": "Aujourd'hui : {n} exécutions",
     "Today: no run yet.": "Aujourd'hui : aucune exécution pour l'instant.",
     "Stop the replay": "Arrêter le rejeu", "Replay the last 24 hours": "Rejouer les dernières 24 heures",
-    "Each agent reports its runs to Cairn Plan. The queue lists the open tickets assigned to it. The page reads again every 20 seconds.":
-      "Chaque agent envoie ses exécutions à Cairn Plan. La file liste les tickets ouverts qui lui sont assignés. La page se relit toutes les 20 secondes.",
+    "Each agent reports its runs to Cairn Plan. The queue lists the open tickets assigned to it. The page reads again every 10 seconds.":
+      "Chaque agent envoie ses exécutions à Cairn Plan. La file liste les tickets ouverts qui lui sont assignés. La page se relit toutes les 10 secondes.",
   },
 };
 

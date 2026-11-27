@@ -21,6 +21,7 @@ else in one SQLite file.
 | Key | Default | |
 |---|---|---|
 | `listen` | `127.0.0.1:9094` | Address and port, plain HTTP. TLS is the proxy's job. |
+| `search_origins` | `[]` | Pages of other sites (`https://host`, no path) that may read `GET /api/search` with the session of the person. The answer then carries `Access-Control-Allow-Origin` and `Access-Control-Allow-Credentials`. Nothing else is opened: no preflight is answered, so no other method or route can be called from those sites. Cairn Doc uses it to show the tickets of a doc. |
 | `trusted_proxies` | none, required | IP addresses of the reverse proxies whose identity headers are believed. A request from any other address is refused (403), whatever its headers. |
 | `require_groups` | `[]` | If not empty, only people in one of these groups get in. |
 | `admin_groups` | `[]` | People in one of these groups are administrators: they create projects and are owners of every project. |
@@ -211,9 +212,9 @@ characters. Each member shows its state at a glance (working, waiting for an
 answer, resting), its current task and for how long. A click opens its sheet:
 on one side what it did (its runs, latest first, with the result of the check
 and the cost), on the other side its queue (the open tickets assigned to it,
-in the order it will take them). The page reads again every 20 seconds.
-"Replay the last 24 hours" plays the runs of the day in one minute. A line
-under the title gives the runs of the members since midnight and their cost.
+in the order it will take them). The page reads again every 10 seconds while the tab is visible
+(and at once when you come back to it). "Replay the last 24 hours" plays the runs of the day in one minute. A line
+under the title gives the runs shown on the page since midnight and their cost.
 
 ```mermaid
 flowchart LR
@@ -244,11 +245,16 @@ The members come from the `team` key of the configuration file:
 | `id` | Short name of the member, in the page address (`/team#worker`). |
 | `name`, `role`, `motto` | What the page shows. |
 | `group` | The `id` of its section. |
-| `look` | Its drawing: `conductor`, `hardhat`, `glasses`, `nightcap`, `dog-headset`, `dog-laptop`, `dog-book`, `cairn`, `courier`, `beacon`, `toolbox`, `binoculars`, `shield`, `scales`; any other value: a plain pebble. |
+| `look` | Its drawing: `conductor`, `hardhat`, `glasses`, `nightcap`, `dog-headset`, `dog-laptop`, `dog-book`, `cairn`, `courier`, `beacon`, `toolbox`, `binoculars`, `shield`, `scales`, `tie`, `coins`, `chart`, `scroll`, `horns`, `gavel`, `quill`; any other value: a plain pebble. |
 | `hue` | Its colour, `#rrggbb`. |
 | `agents` | The `agent` names of its runs (`report_run`). A name ending with `*` is a prefix: `"review-*"` takes every agent whose name starts with `review-`. |
 | `assignees` | The logins whose open tickets form its queue. |
 | `rest`, `empty_queue` | Optional texts shown when it rests, and when its queue is empty. |
+
+A run whose `agent` no member takes would show nowhere. When a team is set and
+such a run exists, the page adds a neutral card, "Others", with those runs in its
+sheet. The card has no queue and does not exist without such runs. A member you declare with the `id` `others`
+replaces it: its `agents` are then yours to choose.
 
 A viewer sees only what Cairn Plan already shows them: the runs and tickets of
 their projects (all of them for an administrator). The page reads the runs of the

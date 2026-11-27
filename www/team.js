@@ -1,7 +1,7 @@
 // cairn-plan team page (served at /team). Each configured member is drawn as a
 // pebble character; its state comes from the runs its agents report
 // (GET /api/runs), its queue from the open tickets assigned to it (GET /api/team).
-// The page reads again every 20 seconds. "Replay" plays the last 24 hours fast.
+// The page reads again every 10 seconds, only while the tab is visible. "Replay" plays the last 24 hours fast.
 "use strict";
 // the key of a run is the pair (account, run_id): two accounts may send the same run_id
 const rid = r => (r.login || "") + "\0" + r.run_id;
@@ -11,7 +11,7 @@ const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&a
 const nowS = () => Date.now() / 1000;
 const STALE = 6 * 3600;       // a run "running" without news for this long is not shown as working
 const WINDOW = 7 * 86400;     // runs read for the page
-const REFRESH = 20000;
+const REFRESH = 10000;
 
 let ME = null, TEAM = { groups: [], members: [] }, RUNS = [], RATES = {}, M = [];
 let mode = "live", clock = 0, openId = null, seen = new Set();
@@ -40,16 +40,22 @@ const verdict = r => {
   if (r.state === "failed") return ["bad", r.result || t("Failed")];
   if (r.state === "waiting") return ["warn", r.result || t("Waiting for an answer")];
   if (!r.result) return ["neutral", t("Done")];
-  return [/écart|ecart|gap|fail|échec|refus/i.test(r.result) ? "warn" : "ok", r.result];
+  return [/écart|ecart|gap|fail|échec|refus|non conforme|not compliant/i.test(r.result) ? "warn" : "ok", r.result];
 };
 
 /** Whether an agent name is one of the member's: exact, or a prefix written "name*". */
 const agentOf = m => agent => (m.agents || []).some(a => a.endsWith("*") ? agent.startsWith(a.slice(0, -1)) : agent === a);
 
+const OTHERS = "others";   // implicit member: the runs of the agents that no member takes
+
 /** Members with their runs, queue and state, from the data read last. */
 function build() {
-  M = TEAM.members.map(m => {
-    const mine = agentOf(m);
+  const members = TEAM.members.slice();
+  // only when a team is set and some run belongs to nobody (a member whose id is "others" is left as it is)
+  if (members.length && !members.some(m => m.id === OTHERS) && RUNS.some(r => !members.some(m => agentOf(m)(r.agent))))
+    members.push({ id: OTHERS, name: t("Others"), role: t("Agents that no member takes"), group: OTHERS, look: "", hue: "#8c7d6b", others: true });
+  M = members.map(m => {
+    const mine = m.others ? agent => !TEAM.members.some(x => agentOf(x)(agent)) : agentOf(m);
     const runs = RUNS.filter(r => mine(r.agent)).sort((a, b) => b.started - a.started);
     const rated = Object.keys(RATES).filter(mine);
     const usd = rated.reduce((s, a) => s + RATES[a].usd, 0);
@@ -127,6 +133,23 @@ const LOOKS = {
   scales: ["", `<g transform="translate(-16 -4)"><path d="M88 84V114M80 114H96" stroke="#9a7a1c" stroke-width="3" stroke-linecap="round"/><path d="M72 90H104" stroke="#c9a227" stroke-width="3" stroke-linecap="round"/>
     <path d="M72 90L67 101M72 90L77 101M104 90L99 101M104 90L109 101" stroke="#9a7a1c" stroke-width="1.2"/>
     <path d="M65 101H79A7 4 0 0 1 65 101Z" fill="#c9a227"/><path d="M97 101H111A7 4 0 0 1 97 101Z" fill="#c9a227"/></g>`],
+  tie: ["", `<path d="M49 85L60 93L71 85" fill="none" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M56.5 92H63.5L62 97L65.5 112L60 118L54.5 112L58 97Z" fill="#b23a48"/>
+    <g transform="translate(-11 -9)"><rect x="76" y="99" width="27" height="19" rx="3" fill="#5b4636"/><path d="M84 99V94.5H95V99" fill="none" stroke="#3d2f24" stroke-width="2.6"/><path d="M76 107H103" stroke="#3d2f24" stroke-width="1.6"/></g>`],
+  coins: ["", `<path d="M33 49C40 41 80 41 87 49L93 53C78 48 42 48 27 53Z" fill="#2f8f6b"/>
+    <g transform="translate(-9 -9)"><ellipse cx="88" cy="113" rx="13" ry="4.5" fill="#b8901c"/><ellipse cx="88" cy="108" rx="13" ry="4.5" fill="#c9a227"/><ellipse cx="88" cy="103" rx="13" ry="4.5" fill="#dcb93a"/><ellipse cx="88" cy="98" rx="13" ry="4.5" fill="#efcf58"/>
+    <path d="M83 98H93" stroke="#9a7a1c" stroke-width="1.6" stroke-linecap="round"/></g>`],
+  chart: ["", `<rect x="64" y="88" width="38" height="28" rx="3" fill="#ffffff" stroke="#b9c2cf" stroke-width="1.5"/>
+    <path d="M70 110L78 101L85 105L96 94" fill="none" stroke="#2e7d6b" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="96" cy="94" r="2.6" fill="#2e7d6b"/>`],
+  scroll: ["", `<g transform="rotate(-9 86 103)"><rect x="72" y="88" width="27" height="31" rx="2" fill="#fbf4df" stroke="#cdbf96" stroke-width="1.4"/>
+    <path d="M77 95H94M77 100H94M77 105H88" stroke="#bfb08a" stroke-width="1.6" stroke-linecap="round"/><circle cx="91" cy="112" r="4.2" fill="#b23a48"/></g>`],
+  horns: ["", `<path d="M44 40C38 33 38 24 43 19C45 27 49 32 54 35Z" fill="#b23a48"/><path d="M76 40C82 33 82 24 77 19C75 27 71 32 66 35Z" fill="#b23a48"/>
+    <g transform="translate(-9 -6)"><circle cx="90" cy="102" r="12" fill="#ffffff" stroke="#b23a48" stroke-width="2.4"/>
+    <path d="M86 98.5C86 93 94 93 94 98.5C94 101.5 90 101.5 90 105" fill="none" stroke="#b23a48" stroke-width="2.6" stroke-linecap="round"/><circle cx="90" cy="109.2" r="1.6" fill="#b23a48"/></g>`],
+  gavel: ["", `<g transform="translate(-10 -9)"><g transform="rotate(-28 88 100)"><rect x="75" y="88" width="26" height="12" rx="3.5" fill="#7a5230"/><rect x="86" y="99" width="4.5" height="22" rx="2.2" fill="#a9773f"/></g>
+    <rect x="66" y="115" width="26" height="4.5" rx="2.2" fill="#5b3d22"/></g>`],
+  quill: ["", `<g transform="translate(-5 -7)"><rect x="61" y="106" width="15" height="11" rx="2.5" fill="#2a2d38"/><rect x="64" y="103" width="9" height="4" rx="1.5" fill="#3a3d4a"/>
+    <path d="M100 78C91 83 82 95 78 110L82 111C90 102 98 92 100 78Z" fill="#f4f1e8" stroke="#b9b3a2" stroke-width="1.2" stroke-linejoin="round"/><path d="M79 109L75 118" stroke="#3a3b44" stroke-width="2" stroke-linecap="round"/></g>`],
   beacon: [`<g class="beam"><path d="M60 8L50 -6H70Z" fill="#ef4444" fill-opacity=".35"/><path d="M44 16L28 8L34 22Z" fill="#ef4444" fill-opacity=".3"/><path d="M76 16L92 8L86 22Z" fill="#ef4444" fill-opacity=".3"/></g>`,
     `<path d="M33 52C33 27 87 27 87 52Z" fill="#e9eef5"/><rect x="29" y="49" width="62" height="6" rx="3" fill="#cfd7e2"/><path d="M52 30C52 19 68 19 68 30Z" fill="#ef4444"/>
     <rect x="44" y="92" width="32" height="20" rx="4" fill="#f4f6f9"/><path d="M50 97H70M50 102H64" stroke="#c4242a" stroke-width="2.2" stroke-linecap="round"/>`],
@@ -158,9 +181,10 @@ function buildCards() {
     box.innerHTML = `<p class="empty-page">${esc(t("No team is configured. An administrator lists the members in the \"team\" key of the configuration file."))}</p>`;
     return;
   }
-  const groups = TEAM.groups.length ? TEAM.groups : [{ id: "", title: "" }];
+  const groups = (TEAM.groups.length ? TEAM.groups : [{ id: "", title: "" }]).slice();
+  if (M.some(m => m.others) && !groups.some(g => g.id === OTHERS)) groups.push({ id: OTHERS, title: "" });
   for (const g of groups) {
-    const members = M.filter(m => (m.group || "") === (g.id || "") || (!TEAM.groups.some(x => x.id === m.group) && g === groups[0]));
+    const members = M.filter(m => (m.group || "") === (g.id || "") || (!groups.some(x => x.id === m.group) && g === groups[0]));
     if (!members.length) continue;
     const sec = document.createElement("section"); sec.className = "team";
     if (g.title) sec.innerHTML = `<h2>${esc(g.title)}${g.note ? ` <small>${esc(g.note)}</small>` : ""}</h2>`;
@@ -299,13 +323,13 @@ async function refresh(first) {
         if (was === undefined) log(t("{who} starts: {task}", { who: m.name || m.id, task: r.task }), r.started);
         if (r.state !== "running" && was !== r.state && r.ended) log(t("{who} finished: {task}", { who: m.name || m.id, task: r.task }), r.ended);
       }
-      if (M.some(m => !$("card-" + m.id))) buildCards(); else M.forEach(updateCard);
+      if (M.some(m => !$("card-" + m.id)) || document.querySelectorAll(".agent").length !== M.length) buildCards(); else M.forEach(updateCard);
     }
     summary();
     if (openId) renderFiche();
   } catch (e) {
     document.body.classList.add("offline");
-    $("alert").textContent = t("Cairn Plan does not answer. The page tries again in 20 seconds.");
+    $("alert").textContent = t("Cairn Plan does not answer. The page tries again in 10 seconds.");
     $("alert").hidden = false;
   }
   chip();
@@ -359,11 +383,13 @@ function stopReplay() {
   $("title").textContent = t("The team");
   $("host").textContent = location.host;
   $("replaylabel").textContent = t("Replay the last 24 hours");
-  $("foot").textContent = t("Each agent reports its runs to Cairn Plan. The queue lists the open tickets assigned to it. The page reads again every 20 seconds.");
+  $("foot").textContent = t("Each agent reports its runs to Cairn Plan. The queue lists the open tickets assigned to it. The page reads again every 10 seconds.");
   $("replay").addEventListener("click", () => mode === "replay" ? stopReplay() : replay());
   await refresh(true);
   if (planUrl()) $("brand").href = planUrl();
   const h = decodeURIComponent(location.hash.slice(1)); if (M.some(m => m.id === h)) openFiche(h);
-  timer = setInterval(() => { if (mode === "live") refresh(false); }, REFRESH);
+  const again = () => { if (mode === "live" && document.visibilityState === "visible") refresh(false); };
+  timer = setInterval(again, REFRESH);
+  document.addEventListener("visibilitychange", again);
   setInterval(() => { if (mode === "live") tick(); }, 1000);
 })();

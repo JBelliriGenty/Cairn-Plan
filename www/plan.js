@@ -549,15 +549,15 @@ async function agentPage() {
     el("a", { class: "button", href: "#/s" }, t("Settings")));
   if (!a.set) return show(head, el("p", { class: "note" }, t("No agent is set: give its webhook address and secret in the settings.")));
   if (a.error) return show(head, el("p", { class: "note" }, t("The agent does not answer: {error}", { error: a.error })));
-  const stopped = a.budgets.filter(b => b.paused || b.tickets >= b.max_tickets || b.usd >= b.max_usd);
+  const stopped = a.budgets.filter(b => b.paused || b.usd >= b.max_usd);
   show(head,
     el("p", { class: "agent-now" }, a.ticket ? [t("The agent works on"), " ", el("a", { href: "#/t/" + a.ticket }, a.ticket), "."]
       : a.queued > 0 ? tp(a.queued, "{n} ticket waits for the agent.", "{n} tickets wait for the agent.") : t("The agent has no ticket in hand.")),
-    stopped.length > 0 && el("p", { class: "note" }, t("Stopped until tomorrow: {roles}.", { roles: stopped.map(b => b.role).join(", ") })),
+    stopped.length > 0 && el("p", { class: "note" }, t("Stopped until the next window: {roles}.", { roles: stopped.map(b => b.role).join(", ") })),
     el("h2", {}, t("Today")),
     el("div", { class: "card" }, el("ul", { class: "list" }, a.budgets.map(b => el("li", {},
       el("span", {}, el("strong", {}, b.role), b.paused && el("span", { class: "label" }, " · " + b.paused)),
-      el("span", { class: "label" }, tp(b.tickets, "{n} ticket", "{n} tickets") + " / " + b.max_tickets + " · " + dollars(b.usd) + " / " + dollars(b.max_usd)))))),
+      el("span", { class: "label" }, tp(b.tickets, "{n} ticket", "{n} tickets") + " · " + dollars(b.usd) + " / " + dollars(b.max_usd) + (b.window === "night" ? " · " + t("night") : "")))))),
     el("h2", {}, t("Last lines")),
     el("div", { class: "card" }, a.recent.length ? el("ul", { class: "list notices" }, a.recent.map(l => el("li", {},
       el("span", { class: "excerpt" }, l.text), el("span", { class: "label" }, stamp(l.at)))))
@@ -656,7 +656,7 @@ async function ticket(id) {
   const what = el("input", { maxLength: 500, placeholder: t("Note (optional)"), "aria-label": t("Note (optional)") });
   const picker = el("input", { type: "file", multiple: true, required: true, "aria-label": t("Files") });
   const weight = n => n < 1048576 ? t("{n} kB", { n: Math.max(1, Math.round(n / 1024)) }) : t("{n} MB", { n: (n / 1048576).toFixed(1) });
-  const words = el("textarea", { required: true, rows: 3, maxLength: 10000, placeholder: t("Write a comment") });
+  const words = el("textarea", { required: true, rows: 3, maxLength: 500000, placeholder: t("Write a comment") });
   const wordsMark = draft(words, id + ":comment");
   const descMark = draft(f.description, id + ":description");   // dropped when frozen
   // a question to the person in front: what is asked, then one click to answer
@@ -680,7 +680,7 @@ async function ticket(id) {
     canEdit && el("button", { type: "button", class: "quiet", onclick: act(async () => { await api(path + "/links", { delete: l.id }); await ticket(id); }) }, t("Remove")));
   const docs = tk.links.filter(isDoc), others = tk.links.filter(l => !isDoc(l));
   const waits = !asked && tk.state === "waiting" && approved && approved.actor === ME.login && lastWord && lastWord.author !== ME.login;
-  const answer = el("textarea", { rows: 3, maxLength: 10000, placeholder: t("Your answer (optional)"), "aria-label": t("Your answer") });
+  const answer = el("textarea", { rows: 3, maxLength: 500000, placeholder: t("Your answer (optional)"), "aria-label": t("Your answer") });
   const answerMark = draft(answer, id + ":answer");
   const reply = state => act(async () => {
     if (answer.value.trim() || !state) await api(path + "/comments", { body: answer.value });   // empty and alone: refused
@@ -727,7 +727,7 @@ async function ticket(id) {
         field("Start", f.start_date), field("End", f.end_date),
         field("Wake up", f.wake_date, "Until that day the ticket is out of « For me » and no agent takes it."),
         field("Milestone", f.milestone, "A family of tickets: a phase, a version."),
-        field("Agent", f.agent, "The agent role that builds it (dev, doc); empty: the project lead.")),
+        field("Agent", f.agent, "The agent role that builds it (dev, doc); empty: the project lead; routine: no agent takes it, a session or the night routine does.")),
       el("datalist", { id: "milestones" }, [...new Set(p.tickets.map(k => k.milestone).filter(Boolean))].sort().map(s => el("option", { value: s }))),
       canEdit && el("div", { class: "row" },
         el("button", { class: "primary" }, t("Save")),

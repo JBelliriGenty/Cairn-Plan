@@ -31,16 +31,19 @@ const MERMAID: &str = include_str!("../www/mermaid-11.12.0.min.js");
 const MERMAID_PATH: &str = "mermaid-11.12.0.min.js";
 
 /// Every key read from the configuration file (checked against the docs by a test).
-const KEYS: [&str; 23] = [
+const KEYS: [&str; 24] = [
     "listen", "trusted_proxies", "require_groups", "admin_groups", "db", "lang", "mcp_keys_file", "mcp_login", "mcp_accounts",
     "webhook_secrets_file",
     "public_url", "smtp_host", "smtp_port", "smtp_credentials_file", "mail_from", "ntfy_url", "ntfy_token_file", "ntfy_topics",
-    "agent_hook_url", "agent_hook_secret_file", "oidc_issuer", "oidc_client_id", "team",
+    "agent_hook_url", "agent_hook_secret_file", "oidc_issuer", "oidc_client_id", "team", "search_origins",
 ];
 
 struct Config {
     listen: String,
     trusted_proxies: Vec<String>,
+    /// Pages of other sites (scheme://host) that may read /api/search with the
+    /// session of the person: Cairn Doc shows the tickets of a doc (docs/configuration.md).
+    search_origins: Vec<String>,
     require_groups: Vec<String>,
     admin_groups: Vec<String>,
     db: String,
@@ -108,6 +111,7 @@ impl Config {
         let cfg = Config {
             listen: s("listen", "127.0.0.1:9094"),
             trusted_proxies: strings(&v, "trusted_proxies"),
+            search_origins: strings(&v, "search_origins"),
             require_groups: strings(&v, "require_groups"),
             admin_groups: strings(&v, "admin_groups"),
             db: s("db", "/var/lib/cairn-plan/plan.db"),
@@ -135,7 +139,7 @@ impl Config {
                         host: host.to_string(),
                         port: v["smtp_port"].as_u64().unwrap_or(587) as u16,
                         user: user.to_string(),
-                        password: password.to_string(),
+                        password: password.to_string(),   // pragma: allowlist secret (field name copied, no value)
                         from: s("mail_from", "Cairn Plan <cairn-plan@localhost>"),
                     }
                 }),
@@ -370,7 +374,8 @@ fn serve_mcp(cfg: &Config, mut r: Request) {
         return respond(r, 405, "method not allowed".into(), "text/plain");
     }
     let mut raw = String::new();
-    let _ = r.as_reader().take(200_000).read_to_string(&mut raw);
+    // room for a comment of store::MAX_COMMENT bytes, escaped in JSON
+    let _ = r.as_reader().take(2_000_000).read_to_string(&mut raw);
     let Ok(req) = serde_json::from_str::<Value>(&raw) else {
         let e = json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "parse error"}});
         return respond(r, 400, e.to_string(), "application/json");
@@ -705,10 +710,10 @@ fn settings_view(cfg: &Config, saved: &HashMap<String, String>) -> Value {
         "smtp_host": smtp.map(|s| s.host.as_str()).unwrap_or(""),
         "smtp_port": smtp.map(|s| s.port).unwrap_or(587),
         "smtp_user": smtp.map(|s| s.user.as_str()).unwrap_or(""),
-        "smtp_password_set": smtp.is_some_and(|s| !s.password.is_empty()),
+        "smtp_password_set": smtp.is_some_and(|s| !s.password.is_empty()),   // pragma: allowlist secret (a boolean: set or not)
         "mail_from": smtp.map(|s| s.from.as_str()).unwrap_or(""),
         "ntfy_url": ntfy.map(|n| n.url.as_str()).unwrap_or(""),
-        "ntfy_token_set": ntfy.is_some_and(|n| !n.token.is_empty()),
+        "ntfy_token_set": ntfy.is_some_and(|n| !n.token.is_empty()),   // pragma: allowlist secret (a boolean: set or not)
         "ntfy_prefix": saved.get("ntfy_prefix").map(String::as_str).unwrap_or(""),
     })
 }
@@ -747,6 +752,25 @@ fn csp(ctype: &str) -> &'static str {
     } else {
         "default-src 'self'; frame-ancestors 'none'"
     }
+}
+
+/// The answer of /api/search to a page of another site listed in search_origins:
+/// read with the session of the person (credentials). Only this GET: a preflight
+/// (OPTIONS) is never answered, so a POST from that site stays refused (CSRF).
+fn respond_search(r: Request, code: u16, body: String, origin: &str) {
+    let h = |k: &str, v: &str| Header::from_bytes(k, v).unwrap();
+    let _ = r.respond(
+        Response::from_string(body)
+            .with_status_code(code)
+            .with_header(h("Content-Type", "application/json; charset=utf-8"))
+            .with_header(h("Cache-Control", "no-store"))
+            .with_header(h("X-Content-Type-Options", "nosniff"))
+            .with_header(h("Referrer-Policy", "no-referrer"))
+            .with_header(h("Content-Security-Policy", csp("application/json")))
+            .with_header(h("Access-Control-Allow-Origin", origin))
+            .with_header(h("Access-Control-Allow-Credentials", "true"))
+            .with_header(h("Vary", "Origin")),
+    );
 }
 
 fn respond(r: Request, code: u16, body: String, ctype: &str) {
@@ -803,7 +827,8 @@ fn handle(cfg: &'static Config, mut r: Request) {
             return respond(r, 400, json!({"error": "invalid request"}).to_string(), "application/json");
         }
         let mut raw = String::new();
-        let _ = r.as_reader().take(100_000).read_to_string(&mut raw);
+        // room for a comment of store::MAX_COMMENT bytes, escaped in JSON
+        let _ = r.as_reader().take(2_000_000).read_to_string(&mut raw);
         match serde_json::from_str(&raw) {
             Ok(v) => body = v,
             Err(_) => return respond(r, 400, json!({"error": "invalid request"}).to_string(), "application/json"),
@@ -832,6 +857,17 @@ fn handle(cfg: &'static Config, mut r: Request) {
     }
     // ponytail: one connection behind one lock; a pool if requests ever queue.
     let c = DB.get().expect("database").lock().unwrap_or_else(|e| e.into_inner());
+    if let (Method::Get, ["api", "search"]) = (&method, segs.as_slice()) {
+        let origin = header(&r, "Origin");
+        if !origin.is_empty() && cfg.search_origins.contains(&origin) {
+            let (code, v) = match store::search(&c, &who, &param(&query, "q"), &param(&query, "project")) {
+                Ok(v) => (200, v),
+                Err((code, e)) => (code, json!({ "error": e })),
+            };
+            drop(c);
+            return respond_search(r, code, v.to_string(), &origin);
+        }
+    }
     let out = match (&method, segs.as_slice()) {
         (Method::Get, ["api", "me"]) => {
             store::seen(&c, &who.login, &name, &email);
@@ -1041,12 +1077,20 @@ mod tests {
         assert!(include_str!("../www/plan.js").contains(super::MERMAID_PATH));
     }
 
+    #[test]
+    fn search_origins_are_read() {
+        let cfg = oidc_config();
+        assert_eq!(cfg.search_origins, ["https://doc.example.org"]);
+        assert!(!cfg.search_origins.contains(&String::new()));
+    }
+
     fn oidc_config() -> super::Config {
         let dir = std::env::temp_dir().join(format!("cairn-plan-oidc-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("config.json");
         let cfg = serde_json::json!({"trusted_proxies": ["127.0.0.1"], "require_groups": ["members"], "admin_groups": ["admins"],
-            "public_url": "https://plan.example.org/", "oidc_issuer": "https://auth.example.org/", "oidc_client_id": "cairn-plan-mcp"});
+            "public_url": "https://plan.example.org/", "oidc_issuer": "https://auth.example.org/", "oidc_client_id": "cairn-plan-mcp",
+            "search_origins": ["https://doc.example.org"]});
         std::fs::write(&f, cfg.to_string()).unwrap();
         super::Config::load(f.to_str().unwrap())
     }

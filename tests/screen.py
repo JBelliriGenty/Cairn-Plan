@@ -108,6 +108,7 @@ try:
     report_run(run_id="s2", agent="controleur", source="claude-code", task="Check the shed", state="ok", started=now - 290, ended=now - 250,
                ticket="DEMO-2", result="conforme")
     report_run(run_id="s3", agent="ouvrier", source="claude-code", task="Paint the roof", state="running", started=now - 60)
+    report_run(run_id="s5", agent="stray", source="claude-code", task="Count the stray sheep", state="ok", started=now - 100, ended=now - 90)
     report_run(run_id="s4", agent="dpo", source="claude-code", task="Audit the sign-up form", state="ok", started=now - 200, ended=now - 150)
 
     # route, what the page must show
@@ -127,8 +128,11 @@ try:
         ("#/q", ["Search", "Type two characters or more."]),
         ("#/agent", ["Agent", "No agent is set"]),
         ("team", ["The team", "Core team", "Worker", "Working", "Paint the roof", "Checker", "Resting", "Today: "]),
-        ("team#worker", ["What it did", "Sweep the shed", "In its queue", "DEMO-1"], ["Audit the sign-up form"]),
-        ("team#privacy", ["Privacy", "Audit the sign-up form"], ["Sweep the shed"]),
+        ("team#worker", ["What it did", "Sweep the shed", "In its queue", "DEMO-1"], ["Audit the sign-up form", "Count the stray sheep"]),
+        # an agent that no member takes: the card "Others", its run in its sheet and nowhere else
+        ("team", ["Others", "Agents that no member takes"]),
+        ("team#others", ["Others", "Count the stray sheep"], ["Sweep the shed", "Audit the sign-up form"]),
+        ("team#privacy", ["Privacy", "Audit the sign-up form"], ["Sweep the shed", "Count the stray sheep"]),
     ]
     bad = []
     for route, wanted, *absent in pages:
